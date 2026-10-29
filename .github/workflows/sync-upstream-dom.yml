@@ -107,29 +107,61 @@ jobs:
         id: merge
         run: |
           git checkout gv70-low-speed-tune
+          # Guard: upstream's own receipt must be valid before we ever
+          # recompute a receipt for a merged tree. If upstream changed
+          # native inputs without a matching build receipt (as Dom head
+          # was on Oct 29), recomputing would hide that staleness.
+          python3 - << 'PY'
+          import subprocess, sys
+          sys.path.insert(0, '.')
+          from openpilot.common.prebuilt_manifest import valid_receipt
+          def git(*args):
+              return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', *args], text=True)
+          print('upstream receipt valid:', valid_receipt(git, 'upstream/Dom'))
+          open('/tmp/upstream_receipt_ok', 'w').write('1' if valid_receipt(git, 'upstream/Dom') else '0')
+          PY
           if git merge --no-edit upstream/Dom; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
-            echo "conflict=true" >> "$GITHUB_OUTPUT"
-            git diff --name-only --diff-filter=U > /tmp/conflicted.txt || true
-            echo "Conflicted files:"; cat /tmp/conflicted.txt || true
-            git merge --abort || true
+            git diff --name-only --diff-filter=U > conflicted.txt || true
+            cp conflicted.txt /tmp/conflicted.txt || true
+            echo "Conflicted files:"; cat conflicted.txt || true
+            # EXPECTED case: only prebuilt.json conflicts. Tune and upstream
+            # both changed its single receipt line from the same base, so
+            # git can never auto-merge it, even when the policy file merges
+            # cleanly. That is NOT a real code conflict: the merged tree
+            # needs a fresh receipt, computed from the merged files.
+            if [ "$(cat conflicted.txt | tr -d '\n')" = "prebuilt.json" ] && [ "$(cat /tmp/upstream_receipt_ok)" = "1" ]; then
+              echo "Prebuilt-only conflict, resolving by recomputing receipt for the merged tree"
+              echo '{"protected_inventory_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "schema_version": 1}' > prebuilt.json
+              git add prebuilt.json
+              git add -A
+              python3 -c "import sys; sys.path.insert(0, '.'); from openpilot.common.prebuilt_manifest import write_receipt; from pathlib import Path; print(write_receipt(Path('.')))"
+              git add prebuilt.json
+              git commit --no-edit
+              echo "conflict=false" >> "$GITHUB_OUTPUT"
+              echo "receipt_recomputed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "conflict=true" >> "$GITHUB_OUTPUT"
+              git merge --abort || true
+            fi
           fi
 
       - name: Open issue on merge conflict (no push)
         if: steps.merge.outputs.conflict == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let files = '';
-            try { files = fs.readFileSync('/tmp/conflicted.txt', 'utf8'); } catch (e) {}
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: 'Upstream Dom merge conflict in gv70-low-speed-tune',
-              body: `Daily upstream sync stopped: merging StarPilotHQ/StarPilot Dom into gv70-low-speed-tune conflicted, so NOTHING was pushed and the comma is unchanged.\n\nConflicted files:\n\`\`\`\n${files}\n\`\`\`\n\nResolve manually: check out gv70-low-speed-tune locally, merge upstream/Dom, resolve the conflicts keeping the GV70 tune, then push.`
-            });
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FILES="$(cat conflicted.txt 2>/dev/null || cat /tmp/conflicted.txt 2>/dev/null || echo '(could not read conflict list)')"
+          echo "Conflicted files: $FILES"
+          gh issue create --title 'Upstream Dom merge conflict in gv70-low-speed-tune' --body "Daily upstream sync stopped: merging StarPilotHQ/StarPilot Dom into gv70-low-speed-tune conflicted, so NOTHING was pushed and the comma is unchanged.
+
+          Conflicted files:
+          \`\`\`
+          $FILES
+          \`\`\`
+
+          Resolve manually: check out gv70-low-speed-tune locally, merge upstream/Dom, resolve the conflicts keeping the GV70 tune, then push."
 
       - name: Verify tune markers still present after clean merge
         id: verify
@@ -150,15 +182,12 @@ jobs:
 
       - name: Open issue if tune was lost (no push)
         if: steps.verify.outputs.lost == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: 'Tune change lost in upstream merge',
-              body: `Daily upstream sync merged cleanly, but the GV70 tune markers (GV70_LOW_SPEED_Y / GV70_KP_INTERP in genesis_gv70_policy.py) are missing or the tune diff vs Dom is empty, so NOTHING was pushed and the comma is unchanged.\n\nThis usually means upstream refactored that file. Re-apply the tune on top of the new upstream code, re-run replay, then push manually.`
-            });
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --title 'Tune change lost in upstream merge' --body "Daily upstream sync merged cleanly, but the GV70 tune markers (GV70_LOW_SPEED_Y / GV70_KP_INTERP in genesis_gv70_policy.py) are missing or the tune diff vs Dom is empty, so NOTHING was pushed and the comma is unchanged.
+
+          This usually means upstream refactored that file. Re-apply the tune on top of the new upstream code, re-run replay, then push manually."
 
       - name: Verify prebuilt receipt after merge
         id: receipt
@@ -181,16 +210,14 @@ jobs:
 
       - name: Open issue if receipt mismatched (no push)
         if: steps.receipt.outputs.receipt_ok == 'false'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: 'Prebuilt receipt mismatched after upstream merge',
-              body: `Daily upstream sync merged cleanly and the GV70 tune is intact, but prebuilt.json does not match the merged tree, so NOTHING was pushed and the comma is unchanged.\n\nDo NOT just recompute the receipt blindly: a mismatch after an upstream merge can mean upstream changed native build inputs without a matching build commit (upstream Dom head itself was stale by one commit on Oct 29). Wait for upstream's build commit, or, if the only protected changes are Python-only, recompute the receipt with openpilot/common/prebuilt_manifest.py write_receipt and push manually after verifying no native inputs changed.`
-            });
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --title 'Prebuilt receipt mismatched after upstream merge' --body "Daily upstream sync merged cleanly and the GV70 tune is intact, but prebuilt.json does not match the merged tree, so NOTHING was pushed and the comma is unchanged.
+
+          Do NOT just recompute the receipt blindly: a mismatch after an upstream merge can mean upstream changed native build inputs without a matching build commit (upstream Dom head itself was stale by one commit on Oct 29). Wait for upstream's build commit, or, if the only protected changes are Python-only, recompute the receipt with openpilot/common/prebuilt_manifest.py write_receipt and push manually after verifying no native inputs changed."
 
       - name: Push merged tune branch
         if: steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true' && steps.receipt.outputs.receipt_ok != 'false'
         run: git push origin gv70-low-speed-tune
+        
