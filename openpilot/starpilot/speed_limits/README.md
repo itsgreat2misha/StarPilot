@@ -38,7 +38,8 @@ US signs share a cached antialiased white outline with a transparent interior;
 the offset fits inside the fixed sign height on both screens.
 Both sign styles identify the displayed source: DASH for Dashboard, OSM for offline
 Maps, and VISION for the vision model. Explicit Mapbox readings in historical
-replay use NAV; unidentified sources keep SPEED. Retained readings use LAST.
+replay use NAV; unidentified sources keep SPEED. Retained readings keep their
+original source label.
 Both styles place only this source above the number, beside any pending arrow.
 The source and arrow share a centered row; all sign contents use the same geometry
 on both screens. Small arrows are baked at double resolution and text is aligned
@@ -57,9 +58,19 @@ this policy. No new saved preference or dependency is needed.
 Only a finite positive source observation can propose a limit. Missing, stale and
 unknown observations stay distinct. Source loss clears a pending choice; it cannot
 change set speed. While the publisher remains fresh, the widget retains the latest
-received limit and offset with an unavailable status, independently of accepted
-history and the previous-limit fallback preference. A LAST marker identifies the
-retained reading on either screen. Offset-only edits preserve accepted and
+received limit, offset and original source with an unavailable status, independently
+of accepted history. Cruise continues using its current SET, including a driver's
+manual adjustment. Source loss creates no speed target and cannot select a
+different Conditional Experimental or Conditional Chill mode. Normal mode triggers
+and live braking safeguards remain with their existing owners.
+
+Previous accepted limit and its legacy Experimental fallback are retired.
+`SLCFallback` remains registered without a default solely to preserve existing
+saved bytes for older versions; current code neither reads nor writes it.
+Missing, 0, 1, 2 and malformed old values all use the same behavior above.
+Old Quick Select assignments remain saved but unavailable.
+
+Offset-only edits preserve accepted and
 rejected state and renew action identities. A changed offset can update the set
 speed of the accepted current limit; source loss defers this command until that
 limit is qualified again.
@@ -84,6 +95,10 @@ or creating an SLC override. Adoption and confirmation can update software set
 speed while accelerator override temporarily suspends actuator output. On release the ordinary planner approaches set speed
 using the currently selected braking profile. Existing lead and stopping constraints
 continue to apply.
+
+The onroad screen does not offer a separate button to reapply the displayed limit.
+The configured wheel action to adopt a limit remains available, as do the normal
+set-speed buttons and confirmation for a different limit.
 
 With SLC enabled and system longitudinal control available, card owns software set
 speed even on PCM vehicles; PCM still owns engagement. Native PCM setpoint changes

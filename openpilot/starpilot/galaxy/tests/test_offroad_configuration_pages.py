@@ -80,6 +80,14 @@ class TestOffroadConfigurationPages(unittest.TestCase):
     self.assertFalse(self.context.sample().cp.openpilotLongitudinalControl)
     self.assert_no_car_cache()
 
+  def test_retired_fallback_is_absent_from_galaxy_without_rewriting_saved_bytes(self):
+    path = Path(self.params.get_param_path('SLCFallback'))
+    for raw in (b'0', b'1', b'2', b'broken'):
+      with self.subTest(raw=raw):
+        path.write_bytes(raw)
+        self.assertFalse(any(row['label'] == 'Previous accepted limit' for row in self.page('slc')['rows']))
+        self.assertEqual(path.read_bytes(), raw)
+
   def test_saved_and_manual_contexts_expose_expected_core_settings(self):
     offsets = self.page('slc')
     index = next(i for i, row in enumerate(offsets['rows']) if row['label'] == 'Adopt fixed offsets')
@@ -90,10 +98,10 @@ class TestOffroadConfigurationPages(unittest.TestCase):
       'conditional': ('Saved driving mode',),
       'conditional/cem': ('Speed threshold', 'Speed with lead', 'Stop lights'),
       'lane_change': ('Allow lane changes', 'Minimum lane-change speed', 'Automatic Lane Changes', 'Lane Change Speed'),
-      'slc': ('Speed Limit Controller', 'Automatic adoption', 'Previous accepted limit'),
-      'profiles': ('Short press', 'Hold', 'Force Stop', 'Selected Acceleration Profile', 'Selected Deceleration Profile'),
+      'slc': ('Speed Limit Controller', 'Automatic adoption'),
+      'profiles': ('Force Stop', 'Selected Acceleration Profile', 'Selected Deceleration Profile'),
       'torque': ('Steering Controller', 'Turn Assist', 'Lat Accel', 'Friction'),
-      'wheel': ('Distance long press', 'MODE press', 'Star button'),
+      'wheel': ('Short press', 'Hold', 'Distance long press', 'MODE press', 'Star button'),
     }
     for selection in (None, 'HYUNDAI_IONIQ_6'):
       self.params.put('VehicleSelection', json.loads(encode(selection)), block=True)
@@ -145,11 +153,13 @@ class TestOffroadConfigurationPages(unittest.TestCase):
     selection = self.params.get('VehicleSelection')
     profiles = self.page('profiles')
     rows = {row['label']: row for row in profiles['rows']}
-    for label in ('Short press', 'Hold', 'Force Stop'):
-      self.assertTrue(rows[label]['available'], label)
+    self.assertTrue(rows['Force Stop']['available'])
+    self.assertNotIn('Short press', rows)
+    self.assertNotIn('Hold', rows)
     for label, key in (('Short press', 'CustomCruise'), ('Hold', 'CustomCruiseLong')):
-      current = self.page('profiles')
+      current = self.page('wheel')
       index = next(i for i, row in enumerate(current['rows']) if row['label'] == label)
+      self.assertTrue(current['rows'][index]['available'], label)
       before = float(current['rows'][index]['value'])
       intent = self.gateway.preview(current['view'], index, 1, 'session', b'generation')
       self.assertTrue(self.gateway.confirm(intent['intent'], 'session', b'generation'))
@@ -176,8 +186,9 @@ class TestOffroadConfigurationPages(unittest.TestCase):
 
   def test_alpha_off_allows_saved_long_preferences_without_runtime_activation(self):
     self.params.put_bool('AlphaLongitudinalEnabled', False, block=True)
-    rows = {row['label']: row for row in self.page('profiles')['rows']}
-    for label in ('Short press', 'Hold', 'Force Stop'):
+    self.assertTrue(next(row for row in self.page('profiles')['rows'] if row['label'] == 'Force Stop')['available'])
+    rows = {row['label']: row for row in self.page('wheel')['rows']}
+    for label in ('Short press', 'Hold'):
       self.assertTrue(rows[label]['available'], label)
     self.assertFalse(self.context.sample().cp.openpilotLongitudinalControl)
     self.assertFalse(self.params.get_bool('AlphaLongitudinalEnabled'))
