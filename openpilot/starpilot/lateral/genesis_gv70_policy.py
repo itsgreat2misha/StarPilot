@@ -21,6 +21,7 @@ from openpilot.starpilot.lateral.torque_shaping import (
   LP_FILTER_CUTOFF_HZ,
   MAX_LAT_JERK_UP,
   LOW_SPEED_X,
+  LOW_SPEED_Y,
   MIN_SPEED,
   JERK_GAIN,
   FF_ROLL_OFFSET_FADE_BP,
@@ -56,23 +57,13 @@ def supported_cp(CP):
 
 
 
-# GV70 low-speed tune (experimental, replay-tested Oct 29 2026, NOT upstream).
-# Do NOT edit torque_shaping.py LOW_SPEED_Y / KP_INTERP: those are shared by
-# Bolt, Corolla, G70, GV70, GM, HKG and Ioniq6 policies. These GV70-only values
-# are the replay 0.5x/0.5x point: Kp entries below 5 m/s halved, and the
-# low-speed factor table halved (LSF scales with its square, so the effective
-# low-speed P-term contribution is roughly quartered). Shared tables untouched.
-GV70_LOW_SPEED_Y = [6.0, 5.25, 4.0, 2.5]
-GV70_KP_INTERP = [125.0, 60.0, 32.5, 15.0, 11.5, 5.5, 3.5, 2.0, 0.6]
-
-
 class GenesisGV70TorquePolicy:
   def __init__(self, parent, CP):
     if not supported_cp(CP):
       raise ValueError("Electrified GV70 policy does not match CarParams")
     self.parent = parent
     self.dt = parent.dt
-    parent.pid = PIDController([INTERP_SPEEDS, GV70_KP_INTERP], KI,
+    parent.pid = PIDController([INTERP_SPEEDS, KP_INTERP], KI,
                                [GENESIS_GV70_MEASUREMENT_DAMPING_SPEED_BP, GENESIS_GV70_MEASUREMENT_DAMPING_V],
                                rate=1 / self.dt)
     parent.update_limits()
@@ -129,11 +120,18 @@ class GenesisGV70TorquePolicy:
     measurement_rate = self.measurement_rate_filter.update((measurement - self.previous_measurement) / self.dt)
     measurement_rate = float(np.clip(measurement_rate, -MAX_LAT_JERK_UP, MAX_LAT_JERK_UP))
     self.previous_measurement = measurement
-    low_speed_factor = (np.interp(CS.vEgo, LOW_SPEED_X, GV70_LOW_SPEED_Y) / max(CS.vEgo, MIN_SPEED)) ** 2
+    low_speed_factor = (np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y) / max(CS.vEgo, MIN_SPEED)) ** 2
     current_kp = np.interp(CS.vEgo, parent.pid._k_p[0], parent.pid._k_p[1])
     error = setpoint - measurement
     error_with_lsf = error * (1 + low_speed_factor / max(current_kp, 1e-3))
-    pid_log.error = float(error_with_lsf)
+    # GV70 SP-GAIN (experimental, replay-tested Oct 29 2026, NOT upstream).
+    # Replaces the parked 0.5x tune (halved tables removed;
+    # stock Kp table and LSF table restored). Setpoint-dependent feedback gain:
+    # ~0.52 at setpoint 0, ~0.94 at 1.0, ~1.00 at >=1.8 latAccel.
+    # Small setpoint (straight / wobble zone) -> feedback ~halved.
+    # Large setpoint (sharp turn) -> stock gain, hard constraint preserved.
+    _sp_gain = 0.5 + 0.5 / (1.0 + math.exp(-max(-30.0, min(30.0, (abs(setpoint) - 0.6) / 0.2))))
+    pid_log.error = float(error_with_lsf * _sp_gain)
     ff = gravity_adjusted_future_lateral_accel - parent.torque_params.latAccelOffset * roll_offset_fade
     ff *= get_genesis_gv70_unwind_ff_scale(setpoint, measurement, desired_lateral_jerk, CS.vEgo)
     friction_threshold = get_genesis_gv70_friction_threshold(CS.vEgo, setpoint, desired_lateral_jerk)
