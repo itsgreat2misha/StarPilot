@@ -1,0 +1,158 @@
+# Sync upstream Dom into this fork, without silently overwriting the GV70 tune.
+# Place this file at: .github/workflows/sync-upstream-dom.yml  in the fork.
+# IMPORTANT - where this file must live, and how to avoid upstream workflows running:
+#  - Scheduled workflows only run from the fork's DEFAULT branch. This fork's
+#    default is StarPilot (same as upstream), and you should KEEP it that way.
+#    Do NOT make Dom or gv70-low-speed-tune the default:
+#      * Tune as default would make every new PR in the fork target the tune
+#        branch by default, and would make a clone default to test code.
+#      * Dom as default would make GitHub's "Sync fork" button try to sync
+#        Dom with upstream's default (StarPilot), not upstream Dom - wrong
+#        branch, wrong merge, and a trap if you ever click it.
+#    Instead, add this file to the DEFAULT branch (StarPilot). The workflow
+#    itself checks out gv70-low-speed-tune and merges upstream Dom into it,
+#    so it does not need to live on Dom or on tune. A copy on tune alone
+#    will NOT run on schedule.
+#  - Enabling Actions enables ALL workflows in the fork whose triggers match,
+#    not just this one. Before enabling, in the fork's Actions tab, disable
+#    each upstream workflow you do not want (tests, safety, docs, stale,
+#    jenkins-pr-trigger, ios-companion, auto_pr_review, diff_report,
+#    repo-maintenance, release, ui_preview, simulator-driving). Push-triggered ones only fire on
+#    a push to Dom/master/Domathon, and tune-branch pushes do NOT trigger
+#    them, but the daily Dom sync push DOES push to Dom, so it would trigger
+#    tests/safety/docs in the fork if left enabled. Several upstream jobs are
+#    already guarded by github.repository == 'commaai/openpilot' (release,
+#    repo-maintenance package_updates) and will be no-ops in the fork, but
+#    tests/safety/docs/stale/jenkins are NOT guarded that way.
+#  - Do the disable step in one session with no push in between, and avoid
+#    01:30 UTC (stale), 09:00 UTC (release) and Mon 14:00 UTC (repo-maintenance)
+#    cron times, then check the Actions tab for unexpected runs.
+# NOTE: The Muse GitHub App cannot write under .github/workflows/ (403), so
+# this file must be added via the GitHub web UI (or git push with a PAT).
+# After adding it, enable Actions in the fork: Settings -> Actions -> General
+# -> Allow all actions, otherwise scheduled workflows in forks stay disabled.
+#
+# What it does, daily + on demand:
+#  1. Syncs the fork's Dom branch with StarPilotHQ/StarPilot Dom (fast-forward).
+#  2. Merges upstream Dom into gv70-low-speed-tune (merge commit, never rebase,
+#     never force-push, so the tune commit and the merge commit stay auditable).
+#  3. If the merge CONFLICTS: it aborts, pushes NOTHING, and opens an issue
+#     listing the conflicted files. Your tune commit is untouched, and the
+#     comma will NOT see a broken or overwritten version.
+#  4. If the merge is clean: it checks the tune is still present by marker
+#     (GV70_LOW_SPEED_Y and GV70_KP_INTERP in genesis_gv70_policy.py) and by
+#     diffing the tune branch against Dom for the tune files. If a marker is
+#     missing, or the tune diff is empty, it pushes NOTHING and opens an issue
+#     titled "Tune change lost in upstream merge". This catches the case where
+#     git auto-merges an upstream refactor that silently breaks the tune.
+#  5. Only on a clean merge WITH markers intact does it push Dom and
+#     gv70-low-speed-tune. The comma's next update check against
+#     gv70-low-speed-tune then picks up the latest Dom changes + the tune.
+#
+# How you will know if Dom overwrote your changes:
+#  - Conflict case: a GitHub issue in the fork, named as above, with the
+#    conflicted files listed, and NO push happened (comma unchanged).
+#  - Silent-loss case: a GitHub issue, and NO push happened.
+#  - Normal case: a merge commit on gv70-low-speed-tune whose diff you can
+#    inspect in GitHub (Compare: Dom...gv70-low-speed-tune). The tune files
+#    should still differ from Dom by exactly the GV70 tune lines.
+#  - Git itself never silently overwrites: same-line upstream edits = conflict,
+#    not overwrite. The marker check above is the extra guard for auto-merges.
+
+name: Sync upstream Dom
+
+on:
+  schedule:
+    - cron: "0 13 * * *"  # daily, 13:00 UTC = 09:00 EDT
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tune branch
+        uses: actions/checkout@v4
+        with:
+          ref: gv70-low-speed-tune
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/StarPilotHQ/StarPilot.git || true
+          git fetch upstream Dom
+          git fetch origin Dom gv70-low-speed-tune || true
+
+      - name: Sync fork Dom branch
+        run: |
+          git checkout Dom
+          git merge --ff-only upstream/Dom || {
+            echo "Fork Dom is not a fast-forward of upstream Dom - needs manual review"
+            exit 1
+          }
+          git push origin Dom
+
+      - name: Merge upstream Dom into tune branch
+        id: merge
+        run: |
+          git checkout gv70-low-speed-tune
+          if git merge --no-edit upstream/Dom; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > /tmp/conflicted.txt || true
+            echo "Conflicted files:"; cat /tmp/conflicted.txt || true
+            git merge --abort || true
+          fi
+
+      - name: Open issue on merge conflict (no push)
+        if: steps.merge.outputs.conflict == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let files = '';
+            try { files = fs.readFileSync('/tmp/conflicted.txt', 'utf8'); } catch (e) {}
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Upstream Dom merge conflict in gv70-low-speed-tune',
+              body: `Daily upstream sync stopped: merging StarPilotHQ/StarPilot Dom into gv70-low-speed-tune conflicted, so NOTHING was pushed and the comma is unchanged.\n\nConflicted files:\n\`\`\`\n${files}\n\`\`\`\n\nResolve manually: check out gv70-low-speed-tune locally, merge upstream/Dom, resolve the conflicts keeping the GV70 tune, then push.`
+            });
+
+      - name: Verify tune markers still present after clean merge
+        id: verify
+        if: steps.merge.outputs.conflict != 'true'
+        run: |
+          FILE="openpilot/starpilot/lateral/genesis_gv70_policy.py"
+          if ! grep -q "GV70_LOW_SPEED_Y" "$FILE" || ! grep -q "GV70_KP_INTERP" "$FILE"; then
+            echo "lost=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Tune diff vs Dom (should be only the GV70 tune lines):"
+          git diff --stat upstream/Dom -- "$FILE" || true
+          if [ -z "$(git diff upstream/Dom -- "$FILE")" ]; then
+            echo "lost=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "lost=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue if tune was lost (no push)
+        if: steps.verify.outputs.lost == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Tune change lost in upstream merge',
+              body: `Daily upstream sync merged cleanly, but the GV70 tune markers (GV70_LOW_SPEED_Y / GV70_KP_INTERP in genesis_gv70_policy.py) are missing or the tune diff vs Dom is empty, so NOTHING was pushed and the comma is unchanged.\n\nThis usually means upstream refactored that file. Re-apply the tune on top of the new upstream code, re-run replay, then push manually.`
+            });
+
+      - name: Push merged tune branch
+        if: steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true'
+        run: git push origin gv70-low-speed-tune
