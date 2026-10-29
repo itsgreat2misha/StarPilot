@@ -83,6 +83,15 @@ jobs:
 
       - name: Add upstream and fetch
         run: |
+          # REQUIRED: the runner has no git identity by default, and
+          # git merge / git commit fail with "Committer identity unknown"
+          # (exit 128) BEFORE any conflict detection, leaving no
+          # MERGE_HEAD. That was the Oct 29 20:24 failure: merge step
+          # reported a false conflict with an empty file list, and
+          # 'git merge --abort' then failed with "no merge to abort".
+          # Set the standard GitHub Actions bot identity first.
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
           git remote add upstream https://github.com/StarPilotHQ/StarPilot.git || true
           # Fetch with NO branch arguments: an explicit branch fetch only
           # updates FETCH_HEAD, it does NOT create origin/Dom or
@@ -126,6 +135,19 @@ jobs:
             git diff --name-only --diff-filter=U > conflicted.txt || true
             cp conflicted.txt /tmp/conflicted.txt || true
             echo "Conflicted files:"; cat conflicted.txt || true
+            # Pass the list via a step output too, not just a file: file
+            # passing between steps proved unreliable in the Oct 29 runs
+            # (issue step saw an empty list even though merge step logged
+            # one). Also write it to the job summary so it is visible even
+            # if issue creation is unavailable.
+            echo "files=$(paste -sd ',' conflicted.txt)" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Upstream merge conflict"
+              echo "Conflicted files:"
+              echo '```'
+              cat conflicted.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             # EXPECTED case: only prebuilt.json conflicts. Tune and upstream
             # both changed its single receipt line from the same base, so
             # git can never auto-merge it, even when the policy file merges
@@ -149,19 +171,27 @@ jobs:
 
       - name: Open issue on merge conflict (no push)
         if: steps.merge.outputs.conflict == 'true'
+        # Best-effort only: issues are DISABLED in this fork (inherited
+        # from upstream, has_issues=false on Oct 29), so issue creation
+        # will fail until the fork owner enables them in
+        # Settings -> General -> Features -> Issues. Do NOT let that
+        # failure hide the conflict itself: the conflict list is already
+        # in the job summary and the merge-step output above.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          FILES="$(cat conflicted.txt 2>/dev/null || cat /tmp/conflicted.txt 2>/dev/null || echo '(could not read conflict list)')"
+          FILES="${{ steps.merge.outputs.files }}"
+          if [ -z "$FILES" ]; then FILES="$(cat conflicted.txt 2>/dev/null || cat /tmp/conflicted.txt 2>/dev/null || echo '(could not read conflict list)')"; fi
           echo "Conflicted files: $FILES"
-          gh issue create --title 'Upstream Dom merge conflict in gv70-low-speed-tune' --body "Daily upstream sync stopped: merging StarPilotHQ/StarPilot Dom into gv70-low-speed-tune conflicted, so NOTHING was pushed and the comma is unchanged.
+          gh issue create --repo itsgreat2misha/StarPilot --title 'Upstream Dom merge conflict in gv70-low-speed-tune' --body "Daily upstream sync stopped: merging StarPilotHQ/StarPilot Dom into gv70-low-speed-tune conflicted, so NOTHING was pushed and the comma is unchanged.
 
           Conflicted files:
           \`\`\`
           $FILES
           \`\`\`
 
-          Resolve manually: check out gv70-low-speed-tune locally, merge upstream/Dom, resolve the conflicts keeping the GV70 tune, then push."
+          Resolve manually: check out gv70-low-speed-tune locally, merge upstream/Dom, resolve the conflicts keeping the GV70 tune, then push." || echo "Issue creation failed (likely issues disabled in fork) - conflict details are in the job summary above."
 
       - name: Verify tune markers still present after clean merge
         id: verify
@@ -182,10 +212,11 @@ jobs:
 
       - name: Open issue if tune was lost (no push)
         if: steps.verify.outputs.lost == 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue create --title 'Tune change lost in upstream merge' --body "Daily upstream sync merged cleanly, but the GV70 tune markers (GV70_LOW_SPEED_Y / GV70_KP_INTERP in genesis_gv70_policy.py) are missing or the tune diff vs Dom is empty, so NOTHING was pushed and the comma is unchanged.
+          gh issue create --repo itsgreat2misha/StarPilot --title 'Tune change lost in upstream merge' --body "Daily upstream sync merged cleanly, but the GV70 tune markers (GV70_LOW_SPEED_Y / GV70_KP_INTERP in genesis_gv70_policy.py) are missing or the tune diff vs Dom is empty, so NOTHING was pushed and the comma is unchanged.
 
           This usually means upstream refactored that file. Re-apply the tune on top of the new upstream code, re-run replay, then push manually."
 
@@ -210,14 +241,22 @@ jobs:
 
       - name: Open issue if receipt mismatched (no push)
         if: steps.receipt.outputs.receipt_ok == 'false'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue create --title 'Prebuilt receipt mismatched after upstream merge' --body "Daily upstream sync merged cleanly and the GV70 tune is intact, but prebuilt.json does not match the merged tree, so NOTHING was pushed and the comma is unchanged.
+          gh issue create --repo itsgreat2misha/StarPilot --title 'Prebuilt receipt mismatched after upstream merge' --body "Daily upstream sync merged cleanly and the GV70 tune is intact, but prebuilt.json does not match the merged tree, so NOTHING was pushed and the comma is unchanged.
 
           Do NOT just recompute the receipt blindly: a mismatch after an upstream merge can mean upstream changed native build inputs without a matching build commit (upstream Dom head itself was stale by one commit on Oct 29). Wait for upstream's build commit, or, if the only protected changes are Python-only, recompute the receipt with openpilot/common/prebuilt_manifest.py write_receipt and push manually after verifying no native inputs changed."
 
       - name: Push merged tune branch
         if: steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true' && steps.receipt.outputs.receipt_ok != 'false'
         run: git push origin gv70-low-speed-tune
-        
+
+      - name: Fail job if sync did not push (conflict / lost tune / bad receipt)
+        if: steps.merge.outputs.conflict == 'true' || steps.verify.outputs.lost == 'true' || steps.receipt.outputs.receipt_ok == 'false'
+        run: |
+          echo "Sync did not push: conflict=${{ steps.merge.outputs.conflict }}, lost=${{ steps.verify.outputs.lost }}, receipt_ok=${{ steps.receipt.outputs.receipt_ok }}"
+          echo "See job summary and logs for conflicted files. Tune branch unchanged."
+          exit 1
+          
