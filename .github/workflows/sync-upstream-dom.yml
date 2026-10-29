@@ -153,7 +153,37 @@ jobs:
               body: `Daily upstream sync merged cleanly, but the GV70 tune markers (GV70_LOW_SPEED_Y / GV70_KP_INTERP in genesis_gv70_policy.py) are missing or the tune diff vs Dom is empty, so NOTHING was pushed and the comma is unchanged.\n\nThis usually means upstream refactored that file. Re-apply the tune on top of the new upstream code, re-run replay, then push manually.`
             });
 
-      - name: Push merged tune branch
+      - name: Verify prebuilt receipt after merge
+        id: receipt
         if: steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true'
+        run: |
+          python3 - << 'PY'
+          import json, subprocess, sys
+          sys.path.insert(0, '.')
+          from openpilot.common.prebuilt_manifest import revision_digest, valid_receipt
+          def git(*args):
+              return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', *args], text=True)
+          # revision_digest expects a git callable like in fast_update: git('ls-tree', ...)
+          print('valid_receipt(HEAD):', valid_receipt(lambda *a: git(*a), 'HEAD'))
+          print('digest(HEAD):', revision_digest(lambda *a: git(*a), 'HEAD'))
+          if not valid_receipt(lambda *a: git(*a), 'HEAD'):
+              print('receipt_mismatch=true')
+              open('/tmp/receipt_mismatch', 'w').write('1')
+          PY
+          if [ -f /tmp/receipt_mismatch ]; then echo "receipt_ok=false" >> "$GITHUB_OUTPUT"; else echo "receipt_ok=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Open issue if receipt mismatched (no push)
+        if: steps.receipt.outputs.receipt_ok == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Prebuilt receipt mismatched after upstream merge',
+              body: `Daily upstream sync merged cleanly and the GV70 tune is intact, but prebuilt.json does not match the merged tree, so NOTHING was pushed and the comma is unchanged.\n\nDo NOT just recompute the receipt blindly: a mismatch after an upstream merge can mean upstream changed native build inputs without a matching build commit (upstream Dom head itself was stale by one commit on Oct 29). Wait for upstream's build commit, or, if the only protected changes are Python-only, recompute the receipt with openpilot/common/prebuilt_manifest.py write_receipt and push manually after verifying no native inputs changed.`
+            });
+
+      - name: Push merged tune branch
+        if: steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true' && steps.receipt.outputs.receipt_ok != 'false'
         run: git push origin gv70-low-speed-tune
-  
