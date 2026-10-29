@@ -84,12 +84,19 @@ jobs:
       - name: Add upstream and fetch
         run: |
           git remote add upstream https://github.com/StarPilotHQ/StarPilot.git || true
-          git fetch upstream Dom
-          git fetch origin Dom gv70-low-speed-tune || true
+          # Fetch with NO branch arguments: an explicit branch fetch only
+          # updates FETCH_HEAD, it does NOT create origin/Dom or
+          # upstream/Dom remote-tracking refs, so 'git checkout Dom' and
+          # 'git merge upstream/Dom' below would fail with
+          # "pathspec 'Dom' did not match" / "not something we can merge".
+          # A bare fetch uses the configured refspec and updates all refs.
+          git fetch upstream
+          git fetch origin
+          git branch -a
 
       - name: Sync fork Dom branch
         run: |
-          git checkout Dom
+          git checkout -B Dom origin/Dom
           git merge --ff-only upstream/Dom || {
             echo "Fork Dom is not a fast-forward of upstream Dom - needs manual review"
             exit 1
