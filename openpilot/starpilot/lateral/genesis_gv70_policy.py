@@ -130,7 +130,16 @@ class GenesisGV70TorquePolicy:
     # ~0.52 at setpoint 0, ~0.94 at 1.0, ~1.00 at >=1.8 latAccel.
     # Small setpoint (straight / wobble zone) -> feedback ~halved.
     # Large setpoint (sharp turn) -> stock gain, hard constraint preserved.
-    _sp_gain = 0.5 + 0.5 / (1.0 + math.exp(-max(-30.0, min(30.0, (abs(setpoint) - 0.6) / 0.2))))
+    # SP-GAIN v2 (design Oct 30, 2026, replay only; NOT pushed, NOT installed).
+    # 2D gain map g(setpoint, speed): setpoint sigmoid with a lower floor and
+    # a faster ramp than v1, plus a low-speed centre reduction that targets
+    # start wobble (low speed + low setpoint, where LSF amplification is
+    # largest). At setpoint >= 0.5 the gain is >= v1, so turn entry/build at
+    # mid/high setpoint is NOT reduced; only the centre (wobble) gain is.
+    _sp_gain = 0.40 + 0.60 / (1.0 + math.exp(-max(-30.0, min(30.0, (abs(setpoint) - 0.5) / 0.15))))
+    _sp_low = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, (3.0 - CS.vEgo) / 1.0))))
+    _sp_centre = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, (0.35 - abs(setpoint)) / 0.15))))
+    _sp_gain = _sp_gain * (1.0 - 0.25 * _sp_low * _sp_centre)
     pid_log.error = float(error_with_lsf * _sp_gain)
     ff = gravity_adjusted_future_lateral_accel - parent.torque_params.latAccelOffset * roll_offset_fade
     ff *= get_genesis_gv70_unwind_ff_scale(setpoint, measurement, desired_lateral_jerk, CS.vEgo)
