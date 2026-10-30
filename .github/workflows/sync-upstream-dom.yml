@@ -40,7 +40,7 @@
 #     listing the conflicted files. Your tune commit is untouched, and the
 #     comma will NOT see a broken or overwritten version.
 #  4. If the merge is clean: it checks the tune is still present by marker
-#     (GV70_LOW_SPEED_Y and GV70_KP_INTERP in genesis_gv70_policy.py) and by
+#     (_sp_gain in genesis_gv70_policy.py) and by
 #     diffing the tune branch against Dom for the tune files. If a marker is
 #     missing, or the tune diff is empty, it pushes NOTHING and opens an issue
 #     titled "Tune change lost in upstream merge". This catches the case where
@@ -132,20 +132,19 @@ jobs:
           if git merge --no-edit upstream/Dom; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
-            git diff --name-only --diff-filter=U > conflicted.txt || true
-            cp conflicted.txt /tmp/conflicted.txt || true
-            echo "Conflicted files:"; cat conflicted.txt || true
+            git diff --name-only --diff-filter=U > /tmp/conflicted.txt || true
+            echo "Conflicted files:"; cat /tmp/conflicted.txt || true
             # Pass the list via a step output too, not just a file: file
             # passing between steps proved unreliable in the Oct 29 runs
             # (issue step saw an empty list even though merge step logged
             # one). Also write it to the job summary so it is visible even
             # if issue creation is unavailable.
-            echo "files=$(paste -sd ',' conflicted.txt)" >> "$GITHUB_OUTPUT"
+            echo "files=$(paste -sd ',' /tmp/conflicted.txt)" >> "$GITHUB_OUTPUT"
             {
               echo "### Upstream merge conflict"
               echo "Conflicted files:"
               echo '```'
-              cat conflicted.txt
+              cat /tmp/conflicted.txt
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             # EXPECTED case: only prebuilt.json conflicts. Tune and upstream
@@ -153,11 +152,14 @@ jobs:
             # git can never auto-merge it, even when the policy file merges
             # cleanly. That is NOT a real code conflict: the merged tree
             # needs a fresh receipt, computed from the merged files.
-            if [ "$(cat conflicted.txt | tr -d '\n')" = "prebuilt.json" ] && [ "$(cat /tmp/upstream_receipt_ok)" = "1" ]; then
+            if [ "$(cat /tmp/conflicted.txt | tr -d '\n')" = "prebuilt.json" ] && [ "$(cat /tmp/upstream_receipt_ok)" = "1" ]; then
               echo "Prebuilt-only conflict, resolving by recomputing receipt for the merged tree"
               echo '{"protected_inventory_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "schema_version": 1}' > prebuilt.json
               git add prebuilt.json
-              git add -A
+              # Do NOT 'git add -A' here: it would stage untracked workflow
+              # debris (in the Oct 29 20:38 run it committed conflicted.txt
+              # itself into the merge commit). Merge already staged the
+              # merged files; only prebuilt.json needs adding.
               python3 -c "import sys; sys.path.insert(0, '.'); from openpilot.common.prebuilt_manifest import write_receipt; from pathlib import Path; print(write_receipt(Path('.')))"
               git add prebuilt.json
               git commit --no-edit
@@ -182,7 +184,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           FILES="${{ steps.merge.outputs.files }}"
-          if [ -z "$FILES" ]; then FILES="$(cat conflicted.txt 2>/dev/null || cat /tmp/conflicted.txt 2>/dev/null || echo '(could not read conflict list)')"; fi
+          if [ -z "$FILES" ]; then FILES="$(cat /tmp/conflicted.txt 2>/dev/null || echo '(could not read conflict list)')"; fi
           echo "Conflicted files: $FILES"
           gh issue create --repo itsgreat2misha/StarPilot --title 'Upstream Dom merge conflict in gv70-low-speed-tune' --body "Daily upstream sync stopped: merging StarPilotHQ/StarPilot Dom into gv70-low-speed-tune conflicted, so NOTHING was pushed and the comma is unchanged.
 
@@ -198,7 +200,7 @@ jobs:
         if: steps.merge.outputs.conflict != 'true'
         run: |
           FILE="openpilot/starpilot/lateral/genesis_gv70_policy.py"
-          if ! grep -q "GV70_LOW_SPEED_Y" "$FILE" || ! grep -q "GV70_KP_INTERP" "$FILE"; then
+          if ! grep -q "_sp_gain" "$FILE"; then
             echo "lost=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -216,7 +218,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue create --repo itsgreat2misha/StarPilot --title 'Tune change lost in upstream merge' --body "Daily upstream sync merged cleanly, but the GV70 tune markers (GV70_LOW_SPEED_Y / GV70_KP_INTERP in genesis_gv70_policy.py) are missing or the tune diff vs Dom is empty, so NOTHING was pushed and the comma is unchanged.
+          gh issue create --repo itsgreat2misha/StarPilot --title 'Tune change lost in upstream merge' --body "Daily upstream sync merged cleanly, but the GV70 tune marker (_sp_gain in genesis_gv70_policy.py) is missing or the tune diff vs Dom is empty, so NOTHING was pushed and the comma is unchanged.
 
           This usually means upstream refactored that file. Re-apply the tune on top of the new upstream code, re-run replay, then push manually."
 
@@ -259,4 +261,3 @@ jobs:
           echo "Sync did not push: conflict=${{ steps.merge.outputs.conflict }}, lost=${{ steps.verify.outputs.lost }}, receipt_ok=${{ steps.receipt.outputs.receipt_ok }}"
           echo "See job summary and logs for conflicted files. Tune branch unchanged."
           exit 1
-          
