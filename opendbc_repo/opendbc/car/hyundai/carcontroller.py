@@ -508,9 +508,13 @@ class CarController(CarControllerBase):
         )
     else:
       steering_status_active = CC.enabled
-      if self.ev6_aol_status or (self.ioniq6_longitudinal is not None and
-                                 self.CP.safetyConfigs[-1].safetyParam in (0x8815, 0x8895)):
+      if (self.ev6_aol_status or self.CP.carFingerprint == CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN or
+          (self.ioniq6_longitudinal is not None and
+           self.CP.safetyConfigs[-1].safetyParam in (0x8815, 0x8895))):
         # AOL may steer while ordinary cruise engagement remains off.
+        # TEST ONLY (Oct 30, 2026): extend the EV6/Ioniq 6 AOL treatment to the GV70
+        # to test whether SysIndReq=1 caps EPS authority in AOL-only mode.
+        # Revert after the lot test, regardless of outcome, pending data review.
         steering_status_active |= CC.latActive
       can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN,
                                                             steering_status_active, apply_steer_req, apply_torque))
