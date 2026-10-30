@@ -125,7 +125,11 @@ def policy_for(CP) -> str | None:
   if palisade_supported(CP):
     return 'palisade'
   if gv70_supported(CP):
-    return 'genesis_gv70_electrified'
+    # TEST ONLY (Oct 30, 2026): generic-controller diagnostic. Return None for
+    # GV70 so default_selection() falls back to STANDARD upstream torque
+    # control (no GV70 policy, no SP-GAIN, no shaping scales). Lot only,
+    # revert after data review. This is NOT a fix proposal.
+    return None
   if g70_supported(CP):
     return 'genesis_g70_2020'
   if (str(CP.carFingerprint) == 'HYUNDAI_IONIQ_6' and str(CP.brand) == 'hyundai' and
