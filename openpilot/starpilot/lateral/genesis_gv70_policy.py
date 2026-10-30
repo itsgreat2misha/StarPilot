@@ -75,6 +75,7 @@ class GenesisGV70TorquePolicy:
     self.prev_desired_lateral_accel = 0.0
     self.prev_steering_pressed = False
     self.prev_output_torque = 0.0
+    self._prev_slew_output = 0.0
     self.previous_feedforward = None
     self.low_speed_reset_threshold = max(CP.minSteerSpeed, 0.3)
 
@@ -88,6 +89,7 @@ class GenesisGV70TorquePolicy:
     if not active:
       parent.pid.reset()
       self.prev_output_torque = 0.0
+      self._prev_slew_output = 0.0
       self.previous_feedforward = None
       self.curvature_request_buffer.append(desired_curvature)
       self.previous_measurement = measurement
@@ -173,11 +175,33 @@ class GenesisGV70TorquePolicy:
     pid_log.i = float(parent.pid.i)
     pid_log.d = float(parent.pid.d)
     pid_log.f = float(parent.pid.f)
-    pid_log.output = float(-output_torque)
+    # SETPOINT-GATED OUTPUT SLEW (lot-test build Oct 30 2026; policy-side only,
+    # NOT a panda/host change). Rate-limits the normalized LatControl output
+    # (range +/-1.0, i.e. +/-409 CAN) only while |setpoint| is small (wobble
+    # zone); at large setpoint the slew is 0.10/frame (41 CAN/frame), well
+    # above the host 10 CAN/frame limit, so the host limit governs turns.
+    # Tight rate 0.010/frame = 4.1 CAN/frame; gate: tight at
+    # |setpoint| <= 0.30, smoothstep ramp to full at |setpoint| = 0.50.
+    # Wobble windows exceed 0.30 in only 0.7-8% of frames; turn cores exceed
+    # it in 89-100% (v2 route, replay-v2 setpoints), so the gate separates
+    # the two regimes without touching turn cores.
+    _raw_output = float(-output_torque)
+    _sp_abs = abs(setpoint)
+    if _sp_abs <= 0.30:
+      _slew_max = 0.010
+    elif _sp_abs >= 0.50:
+      _slew_max = 0.10
+    else:
+      _u = (_sp_abs - 0.30) / (0.50 - 0.30)
+      _slew_max = 0.010 + (0.10 - 0.010) * (0.5 - 0.5 * math.cos(math.pi * _u))
+    _slew_delta = max(-_slew_max, min(_slew_max, _raw_output - self._prev_slew_output))
+    _slewed_output = self._prev_slew_output + _slew_delta
+    self._prev_slew_output = float(_slewed_output)
+    pid_log.output = float(_slewed_output)
     pid_log.actualLateralAccel = float(measurement)
     pid_log.desiredLateralAccel = float(setpoint)
     pid_log.desiredLateralJerk = float(desired_lateral_jerk)
     pid_log.saturated = bool(parent._check_saturation(parent.steer_max - abs(output_torque) < 1e-3, CS, steer_limited_by_safety, curvature_limited))
     self.prev_steering_pressed = CS.steeringPressed
     self.prev_output_torque = float(output_torque)
-    return -output_torque, 0.0, pid_log
+    return _slewed_output, 0.0, pid_log
