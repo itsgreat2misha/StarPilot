@@ -62,10 +62,7 @@ def create_steering_messages(packer, CP, CAN, enabled, lat_active, apply_torque)
     lkas_values = values
     if (not CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING and CP.carFingerprint not in (
         CAR.KIA_CARNIVAL_4TH_GEN, CAR.KIA_CARNIVAL_2025,
-        CAR.KIA_CARNIVAL_HEV_4TH_GEN)):
-      # TEST ONLY (staged Oct 30, 2026): remove the GV70 from the preserved-100
-      # exception, so its LKAS Damping_Gain aligns with most other CANFD
-      # torque cars (0). LFA message damping (100) is unchanged, as for others.
+        CAR.KIA_CARNIVAL_HEV_4TH_GEN, CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN)):
       lkas_values = {**values, "Damping_Gain": 0}
     ret.append(packer.make_can_msg(lkas_msg, CAN.ACAN, lkas_values))
   else:

@@ -329,10 +329,7 @@ class CarInterface(CarInterfaceBase):
       if (ret.flags & HyundaiFlags.CANFD and ret.flags & HyundaiFlags.CANFD_LKA_STEER_MSG and
           not ret.flags & HyundaiFlags.CANFD_ANGLE_STEERING and candidate in (
             CAR.KIA_CARNIVAL_4TH_GEN, CAR.KIA_CARNIVAL_2025,
-            CAR.KIA_CARNIVAL_HEV_4TH_GEN)):
-        # TEST ONLY (Oct 30, 2026): GV70 removed from LKAS damping-100 set,
-        # matching its LKAS message damping change (hyundaicanfd.py).
-        # Bit 8192 itself is NOT removed (Carnival alt-resume / other contexts).
+            CAR.KIA_CARNIVAL_HEV_4TH_GEN, CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN)):
         ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.CANFD_LKAS_DAMPING_100.value
     if ret.flags & HyundaiFlags.HYBRID:
       ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.HYBRID_GAS.value
