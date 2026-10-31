@@ -52,6 +52,14 @@ def create_steering_messages(packer, CP, CAN, enabled, lat_active, apply_torque)
     "Damping_Gain": 100,  # can potentially tuned for better perf [3, 200]
   }
 
+  # FIELD SWEEP, variant 1 (NOT PUSHED, candidate only):
+  # GV70 1st-gen only — RcgSta 0 -> 3 when lat_active.
+  # All other cars, and GV70 when not lat_active, keep baseline 0.
+  # This mirrors the existing GV70-specific damping exception pattern
+  # in this same function (GV70 listed by fingerprint, not a global change).
+  if CP is not None and CP.carFingerprint == CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN and lat_active:
+    values = {**values, "LKA_RcgSta": 3}
+
   ret = []
   if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG:
     lkas_msg = "LKAS_ALT" if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG_ALT else "LKAS"
