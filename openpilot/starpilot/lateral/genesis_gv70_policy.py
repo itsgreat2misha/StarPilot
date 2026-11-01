@@ -77,6 +77,11 @@ class GenesisGV70TorquePolicy:
     self.prev_output_torque = 0.0
     self.previous_feedforward = None
     self.low_speed_reset_threshold = max(CP.minSteerSpeed, 0.3)
+    # Approach-build state (gv70-experimental only, precision over comfort).
+    # 50 frames = ~0.5 s at 100 Hz; boost is a magnitude in lateral-accel
+    # units, ramped at 0.05/frame, and is added to feedforward only.
+    self.approach_curv_hist = deque([0.0] * 50, maxlen=50)
+    self.approach_boost = 0.0
 
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature, curvature_limited, lat_delay):
     parent = self.parent
@@ -89,6 +94,8 @@ class GenesisGV70TorquePolicy:
       parent.pid.reset()
       self.prev_output_torque = 0.0
       self.previous_feedforward = None
+      self.approach_boost = 0.0
+      self.approach_curv_hist.append(desired_curvature)
       self.curvature_request_buffer.append(desired_curvature)
       self.previous_measurement = measurement
       self.measurement_rate_filter.x = 0.0
@@ -146,6 +153,59 @@ class GenesisGV70TorquePolicy:
     if not CS.steeringPressed and not self.prev_steering_pressed and self.previous_feedforward is not None:
       ff = get_genesis_gv70_stabilized_output(ff, self.previous_feedforward, setpoint,
                                             desired_lateral_jerk, CS.vEgo, self.dt)
+    # --- Approach-phase build (gv70-experimental only) ---
+    # Target: build steering angle EARLIER, while the approach is only
+    # 18-52% saturated and headroom exists, so the wheel is further along
+    # when demand peaks and the (already saturated) core can maintain it.
+    # This cannot raise max EPS or max command (both still capped at
+    # 1.0 / 409 by PID limits + carcontroller); it only moves command
+    # earlier in a rising-curvature approach.
+    # Gates (all must hold for target > 0):
+    #  * curvature rising for ~0.5 s, same sign, no sign flip >0.008
+    #    in that window (stable path, not a transient / lane change step)
+    #  * |desired_curvature| >= 0.003 (R <= ~333 m; Route 2 BM1 peaks
+    #    at only 0.0071, so a 0.008 floor would never fire there, while
+    #    straight driving sits at ~0.0001, so 0.003 is still well
+    #    above straight noise)
+    #  * 0.5 s curvature trend >= 0.001 (BM1 trends 0.0010-0.0015,
+    #    BM2 0.0019-0.0045, BM3 0.0030-0.0061)
+    #  * speed >= 8 m/s, full above 12 m/s (Route 2 curves: 9-15 m/s)
+    #  * setpoint in the approach zone 0.3-1.9 latAccel, full at 1.0,
+    #    fading to 0 at the 1.9 cap (no effect in saturated cores)
+    #  * driver not pressed, not safety/curvature limited
+    # NOT gated on lane confidence: LatControlTorque.update receives
+    # no model lane-confidence signal, so a low-confidence curve
+    # (Route 2 BM3, 0.13/0.21) cannot be excluded here by code. The
+    # test protocol must therefore exclude low-confidence curves, and
+    # a future controlsd-level gate would be needed for a PR version.
+    # Negative consequences, mitigated by the gates + cap + ramp:
+    #  * steering into a curve early on a wrong model path -> cuts
+    #    the corner / drifts inside (mitigated: sign-stable 0.5 s
+    #    trend, curvature threshold, capped boost, ramped in/out)
+    #  * overshoot / oscillation on unwind (mitigated: boost fades
+    #    to 0 as setpoint approaches the cap and ramps down at
+    #    0.05/frame when the gate closes, not a step)
+    #  * false trigger on a lane change / demand spike (mitigated:
+    #    0.5 s sign-stable trend, not a single-frame jerk spike)
+    #  * abrupt feel at high speed (mitigated: cap 0.45 latAccel
+    #    ~= 0.24 normalised, ramped, not a step to full command)
+    #  * if the demand peak still exceeds the cap, this only delays
+    #    failure, it does not fix it (stated, not hidden).
+    self.approach_curv_hist.append(desired_curvature)
+    _trend = desired_curvature - self.approach_curv_hist[0] if len(self.approach_curv_hist) >= 50 else 0.0
+    _sign_stable = not any(v * desired_curvature < 0.0 and abs(v) > 0.008 for v in self.approach_curv_hist)
+    _rising = (_trend * desired_curvature > 0.0 and abs(_trend) >= 0.001
+               and abs(desired_curvature) >= 0.003 and _sign_stable)
+    _target_boost = 0.0
+    if (_rising and not CS.steeringPressed and not steer_limited_by_safety
+        and not curvature_limited and setpoint != 0.0):
+      _speed_w = float(np.interp(CS.vEgo, [8.0, 12.0], [0.0, 1.0]))
+      _mag_w = float(np.interp(abs(setpoint), [0.3, 1.0, 1.9], [0.0, 1.0, 0.0]))
+      _target_boost = 0.45 * _speed_w * _mag_w
+    _boost_step = float(np.clip(_target_boost - self.approach_boost, -0.05, 0.05))
+    self.approach_boost += _boost_step
+    if self.approach_boost != 0.0 and setpoint != 0.0:
+      ff += math.copysign(self.approach_boost, setpoint)
     self.previous_feedforward = ff
     error_rate = 0.0 if CS.steeringPressed else -measurement_rate
     freeze_integrator = steer_limited_by_safety or CS.steeringPressed or CS.vEgo < self.low_speed_reset_threshold or unwind_detected
