@@ -77,6 +77,7 @@ class GenesisGV70TorquePolicy:
     self.prev_output_torque = 0.0
     self.previous_feedforward = None
     self.low_speed_reset_threshold = max(CP.minSteerSpeed, 0.3)
+    self._moveoff_frames = 0
 
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature, curvature_limited, lat_delay):
     parent = self.parent
@@ -86,6 +87,7 @@ class GenesisGV70TorquePolicy:
     measurement = measured_curvature * CS.vEgo**2
     future_desired_lateral_accel = desired_curvature * CS.vEgo**2
     if not active:
+      self._moveoff_frames = 0
       parent.pid.reset()
       self.prev_output_torque = 0.0
       self.previous_feedforward = None
@@ -120,7 +122,19 @@ class GenesisGV70TorquePolicy:
     measurement_rate = self.measurement_rate_filter.update((measurement - self.previous_measurement) / self.dt)
     measurement_rate = float(np.clip(measurement_rate, -MAX_LAT_JERK_UP, MAX_LAT_JERK_UP))
     self.previous_measurement = measurement
+    # Move-off phase: frames since standstill (reset while inactive / at standstill).
+    if CS.standstill:
+      self._moveoff_frames = 0
+    else:
+      self._moveoff_frames += 1
+    _moveoff_phase = (self._moveoff_frames <= 600) and (CS.vEgo < 9.0)
     low_speed_factor = (np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y) / max(CS.vEgo, MIN_SPEED)) ** 2
+    # Move-off-only calming: setpoint-gated LSF reduction, move-off phase only.
+    # _lsf_scale = 0 at |setpoint| <= 0.30, 1 at >= 0.50, smoothstep between; 1 outside move-off.
+    if _moveoff_phase:
+      _lsf_t = float(np.clip((abs(setpoint) - 0.30) / 0.20, 0.0, 1.0))
+      _lsf_scale = _lsf_t * _lsf_t * (3.0 - 2.0 * _lsf_t)
+      low_speed_factor *= _lsf_scale
     current_kp = np.interp(CS.vEgo, parent.pid._k_p[0], parent.pid._k_p[1])
     error = setpoint - measurement
     error_with_lsf = error * (1 + low_speed_factor / max(current_kp, 1e-3))
