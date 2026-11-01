@@ -520,7 +520,7 @@ class LiveTrackingOptimizer:
     # Wrong domains still arrive with context_changed=True and discard intent.
     transient = not context_changed and reason in (
       'acknowledged_trial_profile_withdrawn', 'expired_response_witness', 'stale_control', 'stale_applied_output',
-      'current_evidence_delayed', 'learning_evidence_delayed', 'consumed_source_mismatch',
+      'current_evidence_delayed', 'learning_evidence_delayed', 'no_current_learning_evidence', 'consumed_source_mismatch',
       'consumer_pending_trial_interrupted',
       'fresh_physical_residual_window_required',
     )
@@ -769,7 +769,10 @@ class LiveTrackingOptimizer:
         # Waiting three unmatched windows also suppresses native discovery
         # throughout a new short curve. No live trial or scored row is accepted.
         last_match = self.comparison[-1].end_ns if self.comparison else self.discovery['selected_end_ns']
-        if (not _matches(self.discovery['anchor'], episode)
+        # A delayed completed window predating selection cannot describe a
+        # newer maneuver change. It remains excluded from the NEW baseline.
+        if (episode.end_ns > self.discovery['selected_end_ns']
+            and not _matches(self.discovery['anchor'], episode)
             and (self.rmse is None or episode.end_ns - last_match >= 3 * (episode.end_ns - episode.start_ns))):
           self._discard_selector()
       if self.discovery is not None:
@@ -991,6 +994,7 @@ class LiveTrackingOptimizer:
 
       unsupported = UNSUPPORTED
     choices: list[TrialChoice] = []
+    alternatives: list[TrialChoice] = []
     # Geometry is input-only and independent of the coordinate group. Compute
     # each cohort once per proposal call, not once for every group. This local
     # memo never survives a new observation, binding, source or profile.
@@ -1088,9 +1092,19 @@ class LiveTrackingOptimizer:
             continue
           delta = sign * step_limit
           directed = [features[id(row)][name].native_effect(delta) for row in rows]
+          alternate = False
           if any(separated / features[id(row)][name].native_endpoints < 0.09
                  for row, (separated, _) in zip(rows, directed, strict=True)):
-            continue
+            # An unfitted secant sign is only a preference. Try an actually
+            # visible opposite experiment only when no preferred choice fits.
+            if self.rmse is not None or observed_worse(-sign) or self._same_inconclusive_trial(name, -sign, rows[-1], now_ns):
+              continue
+            delta = -delta
+            directed = [features[id(row)][name].native_effect(delta) for row in rows]
+            if any(separated / features[id(row)][name].native_endpoints < 0.09
+                   for row, (separated, _) in zip(rows, directed, strict=True)):
+              continue
+            alternate = True
           predicted = min(effect for _, effect in directed)
           expected = predicted * abs(delta) / MAX_STEP / max(_score_scale(row) for row in rows)
           if expected <= 0.0001:
@@ -1108,7 +1122,9 @@ class LiveTrackingOptimizer:
           benefit = sum(abs(features[id(row)][name].error_feature_sum) for row in rows)
           allocation = self._comparison_allocation(episode, expected, target, minimum_episodes=minimum)
           if allocation is not None:
-            choices.append((confidence, group, name, target, rows, benefit, expected, allocation, episode))
+            (alternatives if alternate else choices).append((confidence, group, name, target, rows, benefit, expected, allocation, episode))
+    if not choices:
+      choices = alternatives
     if not choices:
       self.status, self.reason = 'not_identifiable', 'qualified_consistent_hook_sensitivity_required'
       return False
@@ -1232,7 +1248,9 @@ class LiveTrackingOptimizer:
     if (
       state['phase'] == 'trial'
       and self.before
-      and reason in ('independent_future_tracking_not_improved', 'matched_tracking_not_consistently_improved', 'trial_tracking_or_oscillation_worse')
+      and reason in (
+        'independent_future_tracking_not_improved', 'matched_tracking_not_consistently_improved',
+        'trial_tracking_or_oscillation_worse', 'trial_oscillation_batch_worse')
     ):
       for name in state['names']:
         direction = 1 if state['target'][name] > state['baseline'][name] else -1

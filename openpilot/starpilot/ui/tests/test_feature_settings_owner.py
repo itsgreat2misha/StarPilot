@@ -164,36 +164,22 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
       self.assertTrue(self.owner.apply(request))
       self.params.put_bool("ToyotaAutoHold", False, block=True)
 
-  def test_gm_tune_configured_choice_preserves_intent_and_guards_commit(self):
+  def test_volt_tune_is_not_exposed_even_in_configuration(self):
     from opendbc.car.gm.tests.test_volt_transitions import volt_camera_pedal_params
     cp = volt_camera_pedal_params(release=True)
     self.fingerprint = cp.carFingerprint
     self.owner.vehicle_params = lambda: cp
-    self.owner.configuration_vehicle = lambda: True
-    row = self._row("vehicle", "GMLongitudinalTune")
-    self.assertEqual(row.choices, ("Vehicle Default", "Volt Tune"))
-    request = required_change(row)
-    self.assertEqual(request.value, "Volt Tune")
-    self.assertTrue(self.owner.apply(request))
-    self.assertFalse(self.owner.apply(request))
+    self.params.put("GMLongitudinalTune", 2, block=True)
+    for configured in (False, True):
+      self.owner.configuration_vehicle = lambda configured=configured: configured
+      self.assertNotIn("GMLongitudinalTune", [row.key for row in self.owner.snapshot(
+        "vehicle", parked=True, system_long=True, lateral_context=True, metric=False).rows])
     self.assertEqual(Path(self.params.get_param_path("GMLongitudinalTune")).read_bytes(), b"2")
-    self.owner.configuration_vehicle = lambda: False
-    self.assertNotIn("GMLongitudinalTune", [r.key for r in self.owner.snapshot(
-      "vehicle", parked=True, system_long=False, lateral_context=True, metric=False).rows])
-    self.assertEqual(Path(self.params.get_param_path("GMLongitudinalTune")).read_bytes(), b"2")
-    self.owner.configuration_vehicle = lambda: True
-    row = self._row("vehicle", "GMLongitudinalTune")
-    reset = row_default(row)
-    assert reset is not None
-    self.allowed = False
-    self.assertFalse(self.owner.apply(reset))
-    self.allowed = True
-    self.assertTrue(self.owner.apply(reset))
-    self.assertEqual(Path(self.params.get_param_path("GMLongitudinalTune")).read_bytes(), b"0")
 
   def test_gm_tune_invalid_saved_choice_repairs_only_vehicle_default(self):
-    from opendbc.car.gm.tests.test_volt_transitions import volt_camera_pedal_params
-    cp = volt_camera_pedal_params()
+    from opendbc.car.gm.tests.test_bolt_volt_configurations import ordinary_params
+    from opendbc.car.gm.values import CAR as GM_CAR
+    cp = ordinary_params(GM_CAR.CHEVROLET_SUBURBAN, radar=True)
     self.fingerprint = cp.carFingerprint
     self.owner.vehicle_params = lambda: cp
     path = Path(self.params.get_param_path("GMLongitudinalTune"))
@@ -365,7 +351,7 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     from openpilot.starpilot.lateral.controller_selection import policy_for
     from openpilot.starpilot.vehicle_preferences import VehicleStartupPreferences
     cp = interfaces[CAR.MAZDA_CX5_2022].get_non_essential_params(CAR.MAZDA_CX5_2022)
-    self.assertIsNone(policy_for(cp))
+    self.assertEqual(policy_for(cp), 'generic')
     self.owner.vehicle_params = lambda: cp
     self.owner.controller.vehicle_params = self.owner.vehicle_params
     self.fingerprint = cp.carFingerprint
@@ -382,7 +368,20 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     self.assertTrue(self.owner.apply(required_change(self._row("torque", "TurnAssist"))))
     self.assertTrue(VehicleStartupPreferences.read(self.params, enabled=True).turn_assist)
 
+  def test_lane_centering_default_and_saved_off_are_distinct(self):
+    self.assertIsNone(self.params.get("LaneCentering"))
+    row = self._row("lane", "LaneCentering")
+    self.assertEqual(row.value, "On")
+    self.assertEqual(row.default_value, "On")
+    self.assertIsNone(self.params.get("LaneCentering"))
+    self.params.put_bool("LaneCentering", False, block=True)
+    row = self._row("lane", "LaneCentering")
+    self.assertEqual(row.value, "Off")
+    self.assertEqual(row.default_value, "On")
+    self.assertFalse(self.params.get_bool("LaneCentering"))
+
   def test_live_lane_owner_maps_only_explicit_keys(self):
+    self.params.put_bool("LaneCentering", False, block=True)
     from opendbc.car.car_helpers import interfaces
     from opendbc.car.toyota.values import CAR
     cp = interfaces[CAR.TOYOTA_COROLLA_TSS2].get_non_essential_params(CAR.TOYOTA_COROLLA_TSS2)
@@ -520,14 +519,20 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     self.assertTrue(self.owner.apply(required_change(parent)))
     self.assertTrue(self.params.get_bool('SLCConfirmation'))
     authority = self._row("lane", "LaneCenteringE2EAuthority")
-    self.assertEqual(authority.value, "100.0")
+    self.assertEqual(authority.value, "50.0")
     self.assertTrue(self.owner.apply(required_change(authority, -1)))
-    self.assertAlmostEqual(self.params.get("LaneCenteringE2EAuthority"), 0.95)
-    offset = self._row("slc", "Offset1")
-    self.assertFalse(offset.available)
-    self.assertFalse(self.owner.apply(FeatureSettingsRequest("Offset1", offset.source, "5", vehicle_fingerprint=offset.vehicle_fingerprint)))
+    self.assertAlmostEqual(self.params.get("LaneCenteringE2EAuthority"), 0.45)
+    authority = self._row("lane", "LaneCenteringE2EAuthority")
+    self.assertEqual(authority.default_value, "50.0")
+    reset = row_default(authority)
+    assert reset is not None
+    self.assertTrue(self.owner.apply(reset))
+    self.assertEqual(self.params.get("LaneCenteringE2EAuthority"), 0.5)
+    offset = self._row("slc", "slc:offset:1")
+    self.assertTrue(offset.available)
+    self.assertFalse(self.owner.apply(FeatureSettingsRequest("slc:offset:1", offset.source, "5", vehicle_fingerprint=offset.vehicle_fingerprint)))
     Path(self.params.get_param_path("IsMetric")).write_bytes(b"bad")
-    offset = self._row("slc", "Offset1")
+    offset = self._row("slc", "slc:offset:1")
     self.assertIn("invalid saved units", offset.label)
     self.assertEqual(Path(self.params.get_param_path("IsMetric")).read_bytes(), b"bad")
 

@@ -123,7 +123,7 @@ def test_slc_decision_keeps_its_touch_priority_only_where_it_overlaps():
   observed.customization['layouts']['compact']['speed_limit_actions']['y'] = 4
   observed.customization['layouts']['compact']['max_speed']['y'] = 58
   assert card.bounds(observed) is None
-  assert card.bounds(replace(observed, longitudinal_active=False)) is None
+  assert card.bounds(replace(observed, longitudinal_active=False)) is not None  # No confirmation chooser while LONG is disengaged.
   # SLC being on, with no decision on screen, leaves the directions up.
   assert card.bounds(replace(state(), longitudinal_active=True, speed_limit=SpeedLimitObservation(action_enabled=True))) is not None
   large = NavigationCard(Mock(profile=Profile.LARGE))
@@ -164,7 +164,7 @@ def test_native_card_tap_is_consumed_before_favorites_or_background(monkeypatch)
   session._input_snapshot = session.snapshot
   session._update_favorites = Mock()
   session.input = Mock(onroad=NS(claimed=False))
-  session.favorites = Mock(is_open=False)
+  session.favorites = Mock(is_open=False, claims_corner=Mock(return_value=False))
   monkeypatch.setattr(session, 'view', NS(onroad=NS(navigation=card)), raising=False)
   session.press(ShellMode.ONROAD, 120, 40)
   session.favorites.press.assert_not_called()
@@ -182,7 +182,7 @@ def test_existing_slc_or_wheel_touch_owner_keeps_priority(monkeypatch):
   session._input_snapshot = session.snapshot
   session._update_favorites = Mock()
   session.input = Mock(onroad=NS(claimed=True))
-  session.favorites = Mock(is_open=False)
+  session.favorites = Mock(is_open=False, claims_corner=Mock(return_value=False))
   monkeypatch.setattr(session, 'view', NS(onroad=NS(navigation=card)), raising=False)
   session.press(ShellMode.ONROAD, 120, 40)
   card.press.assert_not_called()
@@ -236,6 +236,7 @@ def test_replay_without_wall_anchor_omits_optional_hud_clock():
   document['layouts']['large'][CLOCK_WIDGET]['enabled'] = True
   observed = replace(observed, customization=document)
   view = OnroadView.__new__(OnroadView)
+  view.personality = Mock()
   view.fonts = Mock(profile=Profile.LARGE)
   view.wall_clock = lambda: None
   view._clock(observed)

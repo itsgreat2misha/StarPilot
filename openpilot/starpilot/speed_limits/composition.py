@@ -40,6 +40,8 @@ class Frame:
   classified_cruise: arb.Result | None = None
   is_metric: bool | None = None
   set_speed_ready: bool = True
+  adoption_observations: Mapping[sel.Source, acc.Observation] | None = None
+  confirmation_started_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -157,7 +159,8 @@ def step(state: State, frame: Frame) -> Result:
         classified.status != classified.change.disposition.value or frame.action is not None or frame.adopt is not None):
       return Result(replace(base, reset_required=True), status="invalid_ledger_result",
                     errors=("invalid, stale or ambiguous causal ledger result",))
-  selected = sel.select_limit(frame.observations, frame.selection_policy)
+  selected = sel.select_limit(frame.adoption_observations if frame.adoption_observations is not None else frame.observations,
+                              frame.selection_policy)
   if selected.errors:
     return Result(replace(base, reset_required=True), selection=selected, status="invalid_selection", errors=selected.errors)
   ego = frame.ego_pair
@@ -172,7 +175,8 @@ def step(state: State, frame: Frame) -> Result:
     matches_set = target is not None and sd.set_speed_matches(
       target, host.driver_v_cruise_kph, host.selected_cluster_kph, frame.is_metric)
   acceptance = acc.step(base.acceptance, selected.observation, frame.authority, frame.acceptance_policy,
-                        now_ns=frame.now_ns, action=frame.action, adopt=frame.adopt, set_speed_matches=matches_set)
+                        now_ns=frame.now_ns, action=frame.action, adopt=frame.adopt, set_speed_matches=matches_set,
+                        confirmation_started_ns=frame.confirmation_started_ns)
   base = replace(base, acceptance=acceptance.state)
   if acceptance.errors:
     return Result(replace(base, reset_required=True), selected, acceptance,
@@ -199,7 +203,8 @@ def step(state: State, frame: Frame) -> Result:
     return Result(replace(base, reset_required=True), selected, acceptance, domain, override,
                   status="invalid_domain_or_override", errors=override.errors or (domain.reason,))
   if not active_path or domain.status is not sd.DomainStatus.VALID:
-    return Result(base, selected, acceptance, domain, override, status="inactive_or_unavailable")
+    return Result(base, selected, acceptance, domain, override,
+                  status=acceptance.basis if acceptance.basis == 'source_switch_pending' else 'inactive_or_unavailable')
   context = domain.context
   if (not isinstance(context, sd.DomainContext) or override.state.session_id != state.session_id or
       override.state.last_timestamp_ns != frame.now_ns or override.state.accepted_mps != context.accepted_raw_mps or

@@ -52,7 +52,7 @@ class AppearanceSettingsTests(unittest.TestCase):
   def test_absent_defaults_are_read_only_and_match_both_views(self):
     self.assertEqual(onroad_appearance(self.params), OnroadAppearance())
     self.assertEqual(tuple(row.key for row in self.owner.snapshot(Profile.LARGE).rows),
-                     ("DeveloperSidebar", "HidePersonalityAlerts", "ShowBrakeStatus", "BlindSpotMetrics", "SignalMetrics"))
+                     ("DeveloperSidebar", "HidePersonalityAlerts", "ShowBrakeStatus", "BlindSpotMetrics", "SignalMetrics", "ReduceMotion"))
     self.assertEqual(tuple(row.key for row in self.owner.snapshot(Profile.COMPACT).rows),
                      ("CameraView", "DriverCamera", "StockConfidenceBallWidget", "HidePersonalityAlerts", "ShowBrakeStatus",
                       "HideLeadMarker", "LeadInfo", "SignalMetrics", "BlindSpotMetrics"))
@@ -269,6 +269,7 @@ class AppearanceSettingsTests(unittest.TestCase):
   def test_stock_confidence_rail_requires_fresh_source_and_road_camera(self):
     from openpilot.starpilot.ui.appearance_preferences import CameraViewChoice
     view = onroad.OnroadView.__new__(onroad.OnroadView)
+    view.personality = Mock()
     view.navigation = Mock()
     view.background_layer = None
     view.projection_viewport = None
@@ -477,7 +478,8 @@ class AppearanceSettingsTests(unittest.TestCase):
     large.press(1980, 300, state)
     large.move(1800, 300, state)
     large.release(1800, 300, state)
-    self.assertEqual(changed, [], "the remaining rows fit on one page")
+    self.assertEqual([(action.kind, action.direction) for action in changed], [('scroll', 1)])
+    changed.clear()
     large.press(1980, 300, state)
     large.release(1980, 300, state)
     self.assertEqual(changed[0].row.key, "DeveloperSidebar")
@@ -566,6 +568,7 @@ class AppearanceSettingsTests(unittest.TestCase):
       self.assertEqual(foreground_calls(fonts.draw)[0].args[3:5], (192, 90))
     for profile in (Profile.LARGE, Profile.COMPACT):
       view = onroad.OnroadView.__new__(onroad.OnroadView)
+      view.personality = Mock()
       view.navigation = Mock()
       view.background_layer = None
       view.projection_viewport = None

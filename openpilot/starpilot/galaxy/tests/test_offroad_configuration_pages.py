@@ -58,9 +58,16 @@ class TestOffroadConfigurationPages(unittest.TestCase):
             expected = saved[name]
             if name == 'developer':
               self.assertEqual([row[0] for row in expected], ['Use VOACC'])
-              self.assertFalse(expected[0][1])
-              self.assertTrue(current[0][1])
+              self.assertEqual([row[1] for row in expected], [False])
+              self.assertEqual([row[1] for row in current], [True])
               expected = [(row[0], True, *row[2:]) for row in expected]
+            if name == 'profiles':
+              # Saved configuration uses the native catalog; this preference is Galaxy-only.
+              label = 'Disengage on Accelerator Pedal'
+              self.assertNotIn(label, [row[0] for row in expected])
+              self.assertEqual([row for row in current if row[0] == label],
+                               [(label, True, ('Off', 'On'), 0.0, 0.0, 0.0)])
+              current = [row for row in current if row[0] != label]
             self.assertEqual(expected, current)
         self.assert_no_car_cache()
 
@@ -71,9 +78,9 @@ class TestOffroadConfigurationPages(unittest.TestCase):
     self.assertFalse(context.cp.openpilotLongitudinalControl)
     self.assertTrue(context.configuration_longitudinal)
     page = self.page('slc')
-    index = next(i for i, row in enumerate(page['rows']) if row['label'] == 'Adopt fixed offsets')
+    index = next(i for i, row in enumerate(page['rows']) if row['label'].endswith('offset'))
     self.assertTrue(page['rows'][index]['available'])
-    intent = self.gateway.preview(page['view'], index, 0, 'session', b'generation')
+    intent = self.gateway.preview(page['view'], index, 0, 'session', b'generation', value=3)
     self.assertTrue(self.gateway.confirm(intent['intent'], 'session', b'generation'))
     self.assertTrue(next(row for row in self.page('slc')['rows'] if row['label'] == 'Speed Limit Controller')['available'])
     self.assertFalse(self.params.get_bool('AlphaLongitudinalEnabled'))
@@ -90,8 +97,8 @@ class TestOffroadConfigurationPages(unittest.TestCase):
 
   def test_saved_and_manual_contexts_expose_expected_core_settings(self):
     offsets = self.page('slc')
-    index = next(i for i, row in enumerate(offsets['rows']) if row['label'] == 'Adopt fixed offsets')
-    intent = self.gateway.preview(offsets['view'], index, 0, 'session', b'generation')
+    index = next(i for i, row in enumerate(offsets['rows']) if row['label'].endswith('offset'))
+    intent = self.gateway.preview(offsets['view'], index, 0, 'session', b'generation', value=3)
     self.assertTrue(self.gateway.confirm(intent['intent'], 'session', b'generation'))
     expected = {
       'aol': ('Enable Always On Lateral', 'Brake pause below'),
@@ -114,18 +121,18 @@ class TestOffroadConfigurationPages(unittest.TestCase):
             self.assertTrue(rows[label]['choices'] or rows[label]['step'], (name, label))
       self.assert_no_car_cache()
 
-  def test_fixed_ioniq6_cruise_buttons_remain_outside_remapping_catalog(self):
+  def test_ioniq6_cruise_buttons_are_in_remapping_catalog(self):
     from openpilot.starpilot.car.hyundai.settings import configuration_wheel_policy
     cp = self.context.sample().cp
     policy = configuration_wheel_policy(cp)
     assert policy is not None
-    self.assertTrue(policy.fixed_cruise_buttons)
-    self.assertFalse(policy.lkas_button_supported)
+    self.assertFalse(policy.fixed_cruise_buttons)
+    self.assertTrue(policy.lkas_button_supported)
     self.params.put('LKASButtonControl', 9, block=True)
     self.params.put('MainCruiseButtonControl', 10, block=True)
     labels = {row['label'] for row in self.page('wheel')['rows']}
-    self.assertNotIn('LKAS press', labels)
-    self.assertNotIn('Main cruise press', labels)
+    self.assertIn('LKAS press', labels)
+    self.assertIn('Main cruise press', labels)
     self.assertIn('Distance long press', labels)
     self.assertEqual(self.params.get('LKASButtonControl'), 9)
     self.assertEqual(self.params.get('MainCruiseButtonControl'), 10)

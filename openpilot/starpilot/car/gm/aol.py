@@ -4,17 +4,17 @@ import math
 from opendbc.car.gm.cancel_remap import aol_enabled, enabled as cancel_remap_enabled, supported as cancel_remap_supported
 
 from opendbc.car.structs import CarParams
-from opendbc.car.gm.values import CAR, GMFlags, control_flags, camera_acc_pedal_profile, is_volt_ascm_longitudinal
+from opendbc.car.gm.values import CAR, GMFlags, control_flags, camera_acc_pedal_profile, is_volt_ascm_longitudinal, is_volt_flashed_profile
 from opendbc.car.gm.aol import GM_AOL_ALTERNATIVE_EXPERIENCE, GM_AOL_WORDS, qualified_gm
 from openpilot.starpilot.aol.policy import AolVehiclePolicy
-from openpilot.starpilot.aol.intent import AOL_TOGGLE, AolCardIntent
+from openpilot.starpilot.aol.intent import AOL_TOGGLE, PAUSE_LATERAL, AolCardIntent
 
 
 def policy_for(cp) -> AolVehiclePolicy:
   qualified = qualified_gm(cp)
   return AolVehiclePolicy(intent_supported=qualified, settings_supported=qualified,
                          runtime_supported=qualified, normal_runtime_supported=qualified,
-                         lkas_button_supported=False,
+                         lkas_button_supported=qualified and is_volt_flashed_profile(cp),
                          full_axis_runtime_required=qualified and aol_enabled(cp),
                          alternative_experience_addition=GM_AOL_ALTERNATIVE_EXPERIENCE if qualified else 0)
 
@@ -29,10 +29,10 @@ def native_accepts_cp(cp, model: int, param: int) -> bool:
 
 
 def cc_independent_lateral_below_engage(cp, intent, *, enabled, active):
-  """An armed independent Bolt LAT request uses its steering speed gate."""
-  from opendbc.car.gm.values import is_bolt_cc_profile
+  """An armed conventional-cruise LAT request uses its steering speed gate."""
+  from opendbc.car.gm.values import is_bolt_cc_profile, is_volt_cc_profile
   return bool(not enabled and not active and qualified_gm(cp) and aol_enabled(cp) and
-              is_bolt_cc_profile(cp) and intent is not None and intent.settingsQualified and
+              (is_bolt_cc_profile(cp) or is_volt_cc_profile(cp)) and intent is not None and intent.settingsQualified and
               intent.allowedLatch and intent.lateralArmed and not intent.pauseLateral)
 
 
@@ -96,34 +96,35 @@ def steering_source_gap_intent_only(owner, cs, companion, now_ns: int) -> bool:
   return owner.ordinary_source_availability(cs, now_ns)
 
 
-def held_sdgm_lateral_pedal(owner, cs) -> bool:
+def held_gm_lateral_pedal(owner, cs) -> bool:
   """An already accepted LAT-only pedal state remains intent, never output."""
   from openpilot.starpilot.nostalgia import physical_cancel
   anchor = getattr(owner, 'aol_ordinary_source_anchor', None)
-  if not sdgm_alpha_lateral_owner(owner.CP) or anchor is None:
+  if not qualified_gm(owner.CP) or not aol_enabled(owner.CP) or anchor is None:
     return False
   proof, native, accepted, _, accepted_state = anchor
   settings = getattr(owner, 'aol_settings', None)
   return bool(cs is accepted_state and not getattr(owner, 'car_state_samples', ()) and
     proof[8] and not proof[9] and not owner.enabled and not owner.active and
     native is not None and native.requestedLateral and native.lateralAllowed and
-    not native.requestedLongitudinal and not native.longitudinalAllowed and
     accepted is not None and accepted.allowedLatch and accepted.lateralArmed and
     accepted.settingsQualified and not accepted.pauseLateral and not accepted.pauseLongitudinal and
     settings is not None and settings.enabled and
     not getattr(owner, 'aol_dm_lateral_inhibit', False) and
-    sdgm_alpha_pedal_withdrawal(owner.CP, cs) and not cs.gasPressed and
+    cs.cruiseState.available and (cs.brakePressed or cs.regenBraking) and
+    not cs.steeringDisengage and not cs.gasPressed and
     not cs.seatbeltUnlatched and not physical_cancel(cs, owner.CP) and
     (not cs.brakePressed or cs.standstill or cs.vEgo >= settings.pause_brake_mps))
 
 
 
-def sdgm_lateral_pedal_source_zero(feedback, cp, cs, axis, native, now_ns, *, producer):
+def gm_lateral_pedal_source_zero(feedback, cp, cs, axis, native, now_ns, *, producer):
   """Fresh physical braking cannot turn an accepted LAT-only source wait fatal."""
   from openpilot.starpilot.aol.runtime import SAFETY_MAX_AGE_NS
   from openpilot.starpilot.nostalgia import physical_cancel
+  from opendbc.car.structs import car
   prior = feedback.signature
-  return bool(sdgm_alpha_lateral_owner(cp) and feedback.lateral_only_baseline and
+  return bool(qualified_gm(cp) and aol_enabled(cp) and feedback.ever_lateral_active and
     not feedback.failed and not feedback.pending_event and prior is not None and
     prior[0] == feedback.session and prior[7] == feedback.session and
     prior[14:16] == (producer, feedback.availability_epoch) and
@@ -134,10 +135,15 @@ def sdgm_lateral_pedal_source_zero(feedback, cp, cs, axis, native, now_ns, *, pr
     str(axis.faultReason) == 'availabilityPause' and axis.sourceCarStateMonoTime == 0 and
     axis.desiredLateral and axis.nativeAcknowledged and not axis.desiredLongitudinal and
     not axis.lateralActive and not axis.longitudinalActive and
-    sdgm_alpha_pedal_withdrawal(cp, cs) and not cs.gasPressed and not cs.seatbeltUnlatched and
+    cs.canValid and not cs.canTimeout and cs.cruiseState.available and
+    not cs.steerFaultTemporary and not cs.steerFaultPermanent and not cs.accFaulted and
+    cs.gearShifter in (car.CarState.GearShifter.drive, car.CarState.GearShifter.low,
+                      car.CarState.GearShifter.sport, car.CarState.GearShifter.brake,
+                      car.CarState.GearShifter.manumatic) and
+    (cs.brakePressed or cs.regenBraking) and not cs.doorOpen and not cs.steeringDisengage and
+    not cs.gasPressed and not cs.seatbeltUnlatched and
     not physical_cancel(cs, cp) and native is not None and
-    native.requestedLateral and native.lateralAllowed and
-    not native.requestedLongitudinal and not native.longitudinalAllowed)
+    native.requestedLateral and native.lateralAllowed)
 
 
 def cold_gm_main_intent_current(feedback, sm, cp, cs, axis, native, now_ns, *, producer):
@@ -205,7 +211,7 @@ class GmAolCardIntent(AolCardIntent):
   """Follow physical MAIN; a current fault inhibits intent until healthy again."""
 
   def __init__(self, settings, cp=None):
-    super().__init__(settings, lkas_button_supported=False)
+    super().__init__(settings, lkas_button_supported=is_volt_flashed_profile(cp))
     self.cp = cp
     self.requires_fault_observation = True
     self._main_cycle_required = False
@@ -221,6 +227,12 @@ class GmAolCardIntent(AolCardIntent):
       semantic = CS.as_builder() if hasattr(CS, 'as_builder') else CS.as_reader().as_builder()
       semantic.buttonEvents = [event for event in CS.buttonEvents if str(event.type) != 'cancel']
     super().update_auxiliary(semantic, media=media, media_eligible=media_eligible, fault_active=fault_active)
+
+  @property
+  def lkas_action(self):
+    # MAIN still owns automatic arming; a mapped LKAS toggle pauses steering.
+    action = super().lkas_action
+    return PAUSE_LATERAL if action == AOL_TOGGLE else action
 
   @property
   def main_action(self):

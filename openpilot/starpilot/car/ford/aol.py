@@ -1,6 +1,6 @@
 from dataclasses import replace
 from opendbc.car import structs
-from opendbc.car.ford.aol import qualified, AOL_WORDS, MANUAL, temporary_restriction, aol_safety_config, base_safety_param, ANGLE
+from opendbc.car.ford.aol import qualified, AOL_WORDS, MANUAL, temporary_restriction, aol_safety_config, profile_word
 from openpilot.starpilot.aol.intent import AolCardIntent, AOL_TOGGLE
 from openpilot.starpilot.aol.policy import AolVehiclePolicy
 
@@ -10,24 +10,16 @@ def policy_for(cp):
     return AolVehiclePolicy(intent_supported=True, settings_supported=True, runtime_supported=True,
                             normal_runtime_supported=True, ordinary_axis_ack_required=qualified(cp, marked_only=True),
                             explicit_latch=True, alternative_experience_addition=32,
-                            safety_param_addition=(MANUAL if cp.transmissionType == structs.CarParams.TransmissionType.manual else 0) |
-                              (base_safety_param(cp) if aol_safety_config(cp).safetyParam & ANGLE else 0))
+                            safety_param_addition=MANUAL if cp.transmissionType == structs.CarParams.TransmissionType.manual else 0)
   return AolVehiclePolicy()
 
 
 def native_profile_supported(model, param):
-  return model == int(structs.CarParams.SafetyModel.ford) and param in AOL_WORDS
+  return model == int(structs.CarParams.SafetyModel.ford) and profile_word(param) in AOL_WORDS
 
 
 def native_accepts_cp(cp, model, param):
   return qualified(cp, marked_only=True) and native_profile_supported(model, param) and param == aol_safety_config(cp).safetyParam
-
-
-def early_native_long_withdrawal_supported(cp):
-  # Panda can observe a pedal before the parsed host sample. The existing
-  # independent-LAT proof remains mandatory; this never authorizes LONG.
-  return bool(qualified(cp, marked_only=True) and cp.openpilotLongitudinalControl and
-              aol_safety_config(cp).safetyParam & ANGLE)
 
 
 def native_latch_rejected(cp, native):
@@ -99,6 +91,11 @@ class FordCardIntent(AolCardIntent):
     except (AttributeError, KeyError, IndexError, TypeError, ValueError, OverflowError):
       self.main_idle_transition_qualified = False
 
+  def _arm_from_full_engagement(self, CS, *, source_ns):
+    # Resuming cruise must not undo a deliberate lateral pause.
+    if not self.pause_lateral:
+      super()._arm_from_full_engagement(CS, source_ns=source_ns)
+
   def update(self, CS, **kwargs):
     state = structs.CarState(**CS.to_dict())
     events = [structs.CarState.ButtonEvent(**event.to_dict()) for event in CS.buttonEvents]
@@ -150,11 +147,11 @@ def create_intent(cp, settings):
 
 
 def temporary_eps_restriction(cp, state):
-  """Ford physical EPS pause after LONG is off; intent only, no native permission."""
+  """Ford physical EPS pause; OP-long may continue independently. Intent only."""
   try:
     return bool(qualified(cp, marked_only=True) and
       state.steerFaultTemporary and not state.steerFaultPermanent and state.canValid and not state.canTimeout and
-      state.cruiseState.available and not state.cruiseState.enabled and
+      state.cruiseState.available and (cp.openpilotLongitudinalControl or not state.cruiseState.enabled) and
       state.gearShifter == structs.CarState.GearShifter.drive and
       not state.regenBraking and
       not state.doorOpen and not state.seatbeltUnlatched and not state.accFaulted and
@@ -177,13 +174,13 @@ def temporary_eps_pedal_recovery(cp, state):
 
 
 def physical_cancel_lateral_allowed(cp, cs, intent, native, *, settings, previous,
-                                    source_ns, now_ns, axis_session_id) -> bool:
-  """Cruise CANCEL may retain only an already active, independently granted LAT axis."""
+                                    source_ns, now_ns, axis_session_id, allow_brake=False) -> bool:
+  """A current cruise withdrawal retains only an already active, independently granted LAT axis."""
   from openpilot.starpilot.aol.intent import ButtonType
   from openpilot.starpilot.aol.runtime import (AXIS_MAX_AGE_NS, INTENT_MAX_AGE_NS, SAFETY_MAX_AGE_NS,
                                                native_inventory_matches_cp)
   try:
-    return bool(qualified(cp, marked_only=True) and settings is not None and settings.enabled and not any(settings.cancel_actions) and
+    return bool(qualified(cp, marked_only=True) and settings is not None and settings.enabled and
       previous is not None and previous.lateral_active and previous.native_acknowledged and
       intent is not None and intent.settingsQualified and intent.allowedLatch and intent.lateralArmed and
       not intent.pauseLateral and intent.producerSessionId and intent.carStateLogMonoTime == source_ns and
@@ -193,7 +190,9 @@ def physical_cancel_lateral_allowed(cp, cs, intent, native, *, settings, previou
       cs.canValid and not cs.canTimeout and cs.cruiseState.available and not cs.steerFaultTemporary and
       not cs.steerFaultPermanent and not cs.accFaulted and not cs.doorOpen and not cs.seatbeltUnlatched and
       not cs.vehicleSensorsInvalid and cs.gearShifter == structs.CarState.GearShifter.drive and
-      any(event.type == ButtonType.cancel for event in cs.buttonEvents) and
+      (not any(settings.cancel_actions) and any(event.type == ButtonType.cancel for event in cs.buttonEvents) or
+       allow_brake and cs.brakePressed and not cs.gasPressed and
+       (settings.pause_brake_mps <= 0 or cs.vEgo >= settings.pause_brake_mps or cs.standstill)) and
       native is not None and native.compatible and int(native.protocolVersion) == 1 and
       axis_session_id and native.axisSessionId == axis_session_id and native.requestedLateral and native.lateralAllowed and
       native_accepts_cp(cp, native.safetyModel, native.safetyParam) and native.pandaInventory and

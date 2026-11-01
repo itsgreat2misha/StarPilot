@@ -183,7 +183,6 @@ def _policy_for(CP) -> AolVehiclePolicy:
     explicit_latch=qualified,
     distance_personality=distance_personality,
     safety_param_addition=0x0800 if stock else 0,
-    fixed_cruise_buttons=settings,
     distance_pause_only=settings,
     paddle_pause=settings,
   )
@@ -324,7 +323,8 @@ def early_native_long_withdrawal_supported(CP) -> bool:
   return bool(CP.openpilotLongitudinalControl and
               (qualified_ioniq6(CP) or qualified_canfd_long(CP, marked_only=True) or
                qualified_classic_long(CP, marked_only=True) and
-               CP.safetyConfigs[0].safetyModel == car.CarParams.SafetyModel.hyundai))
+               CP.safetyConfigs[0].safetyModel == car.CarParams.SafetyModel.hyundai or
+               CP.carFingerprint == HyundaiCAR.HYUNDAI_PALISADE_2023 and qualified_blended_alpha(CP, marked_only=True)))
 
 
 def classic_brake_withdrawal(CP, CS) -> bool:
@@ -332,7 +332,8 @@ def classic_brake_withdrawal(CP, CS) -> bool:
               CS.cruiseState.available and not CS.doorOpen and not CS.seatbeltUnlatched and not CS.vehicleSensorsInvalid and
               CS.gearShifter in (car.CarState.GearShifter.drive, car.CarState.GearShifter.sport,
                                  car.CarState.GearShifter.low, car.CarState.GearShifter.brake) and
-              qualified_classic_long(CP, marked_only=True) and
+              (qualified_classic_long(CP, marked_only=True) or
+               CP.carFingerprint == HyundaiCAR.HYUNDAI_PALISADE_2023 and qualified_blended_alpha(CP, marked_only=True)) and
               CP.safetyConfigs[0].safetyModel == car.CarParams.SafetyModel.hyundai)
 
 
@@ -387,8 +388,7 @@ def physical_cancel_lateral_allowed(CP, CS, intent, native, *, settings, previou
         not any(e.type == car.CarState.ButtonEvent.Type.cancel for e in CS.buttonEvents)):
       return False
     ev6_long = CP.carFingerprint == HyundaiCAR.KIA_EV6 and qualified_canfd_long(CP, marked_only=True)
-    return bool((ev6_long or (settings.lkas_action == 9 or settings.main_action == 9) and
-      independent_cruise_buttons_supported(CP, marked_only=True)) and
+    return bool((ev6_long or independent_cruise_buttons_supported(CP, marked_only=True)) and
       previous is not None and previous.lateral_active and previous.native_acknowledged and
       intent is not None and intent.settingsQualified and intent.allowedLatch and intent.lateralArmed and
       not intent.pauseLateral and intent.producerSessionId and intent.carStateLogMonoTime == source_ns and
@@ -433,8 +433,7 @@ def retained_shared_long_cancel_intent(CP, CS, sm, feedback, owner, *, cancel_so
         not owner.allowed_latch or owner.pause_lateral or owner.pause_longitudinal or owner._fault_inhibit):
       return False
     settings = owner.settings
-    if (not settings.enabled or not (ev6_long or settings.lkas_action == 9 or settings.main_action == 9) or
-        any(settings.cancel_actions) or cp_identity(CP) != feedback.cp or
+    if (not settings.enabled or any(settings.cancel_actions) or cp_identity(CP) != feedback.cp or
         feedback.failed or feedback.paused or feedback.pending_event or feedback.qualified or feedback.awaiting or
         feedback.retention_started_ns or feedback.retention_pending or feedback.retention_qualified or
         feedback.source_retention_started_ns or feedback.temporary_host_qualified or

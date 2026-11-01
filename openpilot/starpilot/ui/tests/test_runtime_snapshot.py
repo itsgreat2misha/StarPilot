@@ -101,6 +101,38 @@ def ui_fake():
 
 
 class TestRuntimeSnapshot(unittest.TestCase):
+  def test_switchback_display_uses_payload_reader_with_original_source_metadata(self):
+    from opendbc.car.structs import CarParams
+    ui = ui_fake()
+    cp = CarParams()
+    cp.carFingerprint, cp.brand = 'HYUNDAI_IONIQ_6', 'hyundai'
+    cp.steerControlType = CarParams.SteerControlType.torque
+    cp.safetyConfigs = [CarParams.SafetyConfig(safetyModel=CarParams.SafetyModel.hyundaiCanfd)]
+    ui.CP = cp
+    ui.sm['deviceState'].startedMonoTime = NOW - 1_000_000_000
+    adapter = RuntimeSnapshotAdapter(ui)
+    owner = Mock()
+    owner.sample.side_effect = AssertionError('A SubMaster payload is not an Event envelope')
+    owner.sample_state.return_value = True
+    adapter._switchback = owner
+    snapshot = adapter.build(ShellMode.ONROAD, now_ns=NOW, onroad_view_only=True)
+    self.assertTrue(snapshot.onroad.switchback_mode)
+    owner.sample.assert_not_called()
+    owner.sample_state.assert_called_once_with(ui.sm['slcState'], drive_id=NOW - 1_000_000_000,
+                                              now_ns=NOW, event_ns=ui.sm.logMonoTime['slcState'])
+
+  def test_personality_feedback_uses_current_drive_plan_and_override_events(self):
+    ui = ui_fake()
+    ui.sm.put('longitudinalPlan', NS(hasLead=True))
+    ui.sm.put('onroadEvents', [NS(name=log.OnroadEvent.EventName.gasPressedOverride)])
+    ui.sm.put('driverMonitoringState', NS(isRHD=True))
+    adapter = RuntimeSnapshotAdapter(ui)
+    state = adapter.build(ShellMode.ONROAD, now_ns=NOW).onroad
+    self.assertTrue(state.lead_detected and state.gas_pressed_override and state.right_hand_drive)
+    ui.sm.recv_frame['longitudinalPlan'] = ui.sm.recv_frame['onroadEvents'] = 0
+    state = adapter.build(ShellMode.ONROAD, now_ns=NOW + 1).onroad
+    self.assertFalse(state.lead_detected or state.gas_pressed_override)
+
   def test_home_temperature_uses_live_units_and_warning_status(self):
     from openpilot.starpilot.ui.home import HomeView
     from openpilot.starpilot.ui.presentation import Profile
@@ -422,6 +454,18 @@ class TestRuntimeSnapshot(unittest.TestCase):
     settings = adapter.build(ShellMode.SETTINGS, now_ns=NOW + 1_000_000_001)
     self.assertEqual(settings.software, first.software)
     self.assertEqual(adapter.build(ShellMode.ONROAD, now_ns=NOW + 1_000_000_002).software, first.software)
+
+  def test_background_finalization_allows_metadata_check(self):
+    from openpilot.starpilot.ui.software_state import SoftwareRequest
+    ui = ui_fake()
+    ui.params.values['UpdaterState'] = 'finalizing update...'
+    ui.params.values['UpdaterFastState'] = {'background': True}
+    with patch.object(RuntimeSnapshotAdapter, '_parked', return_value=True):
+      state = RuntimeSnapshotAdapter(ui).build(ShellMode.SETTINGS, now_ns=NOW).software
+      self.assertIn(SoftwareRequest.CHECK_FOR_UPDATES, state.available_actions)
+      ui.params.values['UpdaterFastState']['check'] = {'state': 'checking'}
+      state = RuntimeSnapshotAdapter(ui).build(ShellMode.SETTINGS, now_ns=NOW).software
+      self.assertNotIn(SoftwareRequest.CHECK_FOR_UPDATES, state.available_actions)
 
   def test_customization_uses_existing_refresh_and_invalidation(self):
     adapter = RuntimeSnapshotAdapter(ui_fake())

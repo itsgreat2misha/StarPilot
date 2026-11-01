@@ -53,6 +53,7 @@ class TestBoltCcControlsLow(unittest.TestCase):
         active_frames = gas_frames = cancelled_frames = 0
         drive_pedal_frames = low_pedal_frames = stock_withdrawals = 0
         last_feeds = {}
+        steering_receipts = []
         internal_frames = 0
         internal_status_frames = 0
         from opendbc.safety.tests.test_gm_bolt_pedal import TestGmBoltPedalSafety
@@ -100,7 +101,8 @@ class TestBoltCcControlsLow(unittest.TestCase):
               internal_frames += 1
               internal_status_frames += int(address == 0x3D1)
           libsafety_py.libsafety.safety_tick()
-          cs = ci.update([(now, frames)])
+          cs = ci.update([(now - 5_000_000, steering_receipts), (now, frames)])
+          steering_receipts = []
           self.assertTrue(cs.canValid)
           expected_gear = (structs.CarState.GearShifter.drive if (stock_acc and tick < 180) or 180 <= tick < 220
                            else structs.CarState.GearShifter.low)
@@ -178,6 +180,8 @@ class TestBoltCcControlsLow(unittest.TestCase):
               last_feeds[frame[0]] = frame[1]
             else:
               self.assertTrue(allowed, (tick, hex(frame[0])))
+              if frame[0] == 0x180:
+                steering_receipts.append((frame[0], bytes(frame[1]), 128))
           if stock_acc and (60 <= tick < 100 or 220 <= tick < 240):
             pedals = [frame for frame in commands if frame[0] == 0x200]
             for frame in pedals:

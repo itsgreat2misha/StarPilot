@@ -123,19 +123,21 @@ def ordinary_source_availability(self, CS, now_ns, native=None, *, replay: bool,
   anchor = getattr(self, 'aol_ordinary_source_anchor', None)
   companion = getattr(self, 'aol_intent_companion', None)
   events = self.events.to_msg()
-  from openpilot.starpilot.car.gm.aol import held_sdgm_lateral_pedal
+  from openpilot.starpilot.car.gm.aol import held_gm_lateral_pedal
   from openpilot.starpilot.car.toyota.aol import held_lateral_pedal
   toyota_pedal = held_lateral_pedal(self, CS)
-  held_pedal = held_sdgm_lateral_pedal(self, CS) or toyota_pedal
+  held_pedal = held_gm_lateral_pedal(self, CS) or toyota_pedal
   if held_pedal:
     events = [event for event in events if not (event.name == EventName.pedalPressed and
       event.userDisable and not event.softDisable and not event.immediateDisable)]
   stock_user = None
+  stock_gas = False
   if any(event.name in (EventName.pcmDisable, EventName.cruiseDisabled) and event.userDisable for event in events):
     # Resolve the native value once, as this classifier already does below.
     # Normal healthy frames never enter this nominal stock-role branch.
     native = native or native_provider(self.sm, self.CP, now_ns=now_ns, axis_session_id=self.aol_session_id)
-    if stock_lateral_role(self, CS, native, allow_independent_brake=held_pedal):
+    if stock_lateral_role(self, CS, native, allow_independent_brake=held_pedal, allow_independent_gas=True):
+      stock_gas = bool(CS.gasPressed and anchor is not None and anchor[4].gasPressed)
       stock_user = stock_lateral_user_event(self.CP)
       events = [event for event in events if not (event.name == stock_user and event.userDisable and
         not event.softDisable and not event.immediateDisable)]
@@ -205,12 +207,21 @@ def ordinary_source_availability(self, CS, now_ns, native=None, *, replay: bool,
       accepted is None or accepted.producerSessionId != proof[4] or
       prior_native is None or not prior_native.pandaInventory):
     return False
+  ford_gas = False
+  if (self.CP.brand == 'ford' and proof[8] and not proof[9] and accepted_state is not None and accepted_state.gasPressed and
+      prior_native.requestedLateral and prior_native.lateralAllowed and not prior_native.longitudinalAllowed):
+    from openpilot.starpilot.car.ford.gas_override import healthy_gas_transport_native
+    ford_native = healthy_gas_transport_native(self.sm, self.CP, CS, self.aol_session_id, now_ns)
+    ford_gas = bool(ford_native is not None and (native is None or native == ford_native))
+    if ford_gas:
+      native = ford_native
   samples = getattr(self, 'car_state_samples', ()) or ((CS,
     bool(getattr(self, 'car_state_retained_valid', False) or held_metadata)),)
   if any(not valid or not sample.canValid or sample.canTimeout or sample.steerFaultPermanent or
          sample.steerFaultTemporary or sample.accFaulted or sample.doorOpen or sample.seatbeltUnlatched or
          (sample.brakePressed or sample.regenBraking) and not held_pedal or
-         sample.gasPressed and not toyota_pedal or physical_cancel(sample, self.CP) or
+         sample.gasPressed and not (toyota_pedal or stock_gas or ford_gas) or
+         (stock_gas or ford_gas) and sample.gasPressed != accepted_state.gasPressed or physical_cancel(sample, self.CP) or
          sample.gearShifter not in (car.CarState.GearShifter.drive, car.CarState.GearShifter.sport,
                                    car.CarState.GearShifter.low, car.CarState.GearShifter.brake)
          for sample, valid in samples):
@@ -254,11 +265,11 @@ def ordinary_source_availability(self, CS, now_ns, native=None, *, replay: bool,
     return False
   native = native or native_provider(self.sm, self.CP, now_ns=now_ns, axis_session_id=self.aol_session_id)
   lateral_intent_only = bool(proof[8] and not proof[9] and not self.enabled)
-  if (native is None or held_pedal and (native.requestedLongitudinal or native.longitudinalAllowed) or
+  if (native is None or toyota_pedal and (native.requestedLongitudinal or native.longitudinalAllowed) or
       lateral_intent_only and not (accepted.allowedLatch and accepted.lateralArmed and
         not accepted.pauseLateral and not getattr(self, 'aol_dm_lateral_inhibit', False) and
         native.requestedLateral and native.lateralAllowed) or
-      not healthy_transport(self.sm, self.CP, CS, self.aol_session_id, now_ns, native) or
+      not ford_gas and not healthy_transport(self.sm, self.CP, CS, self.aol_session_id, now_ns, native) or
       native.observedMonoTime < prior_native.observedMonoTime or
       native.pandaSerial != prior_native.pandaSerial or
       tuple(p.hardwareSerial for p in native.pandaInventory) != tuple(p.hardwareSerial for p in prior_native.pandaInventory)):

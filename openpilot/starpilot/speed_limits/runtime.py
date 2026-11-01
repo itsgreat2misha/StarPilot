@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.selfdrive.car.cruise import V_CRUISE_MIN, V_CRUISE_MAX
+from openpilot.starpilot.aol.runtime import current_axis
 from openpilot.starpilot.speed_limits import acceptance as acc
 from openpilot.starpilot.speed_limits import action_arbitration as arb
 from openpilot.starpilot.speed_limits import composition as comp
@@ -14,6 +15,7 @@ from openpilot.starpilot.speed_limits import selection as sel
 from openpilot.starpilot.speed_limits import speed_domain as sd
 from openpilot.starpilot.speed_limits.runtime_settings import Settings
 from openpilot.starpilot.speed_limits.map_observation import MapSource, copy_frame
+from openpilot.starpilot.speed_limits.advance import Advance
 from openpilot.starpilot.speed_limits.vision.observation import clock_pair_ns, vision_observation
 
 
@@ -119,6 +121,7 @@ class Runtime:
     self.settings = settings
     self.is_metric = is_metric
     self.map_source = MapSource()
+    self.advance = Advance()
     self.vision_enabled = vision_enabled
     # Exact saved Vision opt-in may grant control; source identity and current
     # driver confirmation remain independent requirements for each episode.
@@ -148,12 +151,14 @@ class Runtime:
     self.command_card_producer = ''
     self.commanded_acceptance: acc.AcceptedLimit | None = None
     self.last_received: acc.Candidate | None = None
+    self.current_presentation: acc.Presentation | None = None
     self.toyota_eligible = False
     self.toyota_projection = None
     self.commanded_generation = -1
 
   def reset(self) -> None:
     self.map_source.reset()
+    self.advance = Advance()
     self.vision_diagnostic = acc.Observation(acc.ObservationKind.UNKNOWN)
     self._last_vision_producer = ''
     self._last_vision_frame = 0
@@ -178,6 +183,7 @@ class Runtime:
     self.command_card_producer = ''
     self.commanded_acceptance = None
     self.last_received = None
+    self.current_presentation = None
     self.toyota_projection = None
     self.commanded_generation = -1
 
@@ -191,12 +197,25 @@ class Runtime:
     # Renew actions for new offsets/units without forgetting driver choices.
     acceptance = replace(self.state.acceptance, observation=acc.Observation(acc.ObservationKind.UNKNOWN),
                          pending=None, presentation=None, timer_running=False)
+    self.current_presentation = None
     self.state = replace(self.state, acceptance=acceptance)
     self._ui_receipt = None
     # Display units alone must not reapply an accepted SET in different rounding.
     if changed_offsets:
       self.command_status = ''
       self.commanded_acceptance = None
+
+  def update_advance(self, seconds: int) -> None:
+    if type(seconds) is not int or not 0 <= seconds <= 10:
+      raise ValueError('invalid SLC advance time')
+    self.settings = replace(self.settings, advance_seconds=seconds)
+    if seconds == 0:
+      encounter, pending = self.advance.encounter, self.state.acceptance.pending
+      if (encounter is not None and not encounter.crossed and pending is not None and
+          pending.candidate.source == 'map' and pending.candidate.speed_mps == encounter.speed_mps):
+        self.state = replace(self.state, acceptance=replace(self.state.acceptance,
+          observation=acc.Observation(acc.ObservationKind.UNKNOWN), pending=None, presentation=None, timer_running=False))
+      self.advance.disable()
 
   def _event_current(self, event: CruiseEvent, sm, now_ns: int) -> bool:
     return (bool(event.producer_session) and 0 < event.observed_ns <= now_ns and
@@ -240,27 +259,41 @@ class Runtime:
     self.ledger = completed.state
     return classified if not classified.errors and classified.change is not None else None
 
-  def _physical_action(self, event: CruiseEvent, sm, now_ns: int) -> tuple[acc.DriverAction | None, int | None]:
-    if (event.kind not in ('confirmationAccept', 'confirmationReject') or
+  def _physical_action(self, event: CruiseEvent, sm, now_ns: int) -> tuple[acc.DriverAction | None, acc.AdoptRequest | None, int | None]:
+    if (event.kind not in ('confirmationAccept', 'confirmationReject', 'engagementAdopt') or
         not self._event_current(event, sm, now_ns)):
-      return None, None
+      return None, None, None
     self._mark_event(event)
+    engagement = event.kind == 'engagementAdopt'
     pending = self.state.acceptance.pending
     shown = self.state.acceptance.presentation
-    if (event.session_id != self.session_id or pending is None or shown is None or
+    retained_reject = (event.kind == 'confirmationReject' and event.presentation_id == 0 and
+                       pending is not None and event.decision_id == pending.decision_id)
+    if shown is None and engagement:
+      shown = self.current_presentation
+    if (event.session_id != self.session_id or (shown is None and not retained_reject) or
         event.producer_session != str(sm['slcDashboardObservation'].producerSessionId) or
-        event.decision_id != pending.decision_id or event.presentation_id != shown.presentation_id or
-        pending.candidate != shown.candidate or
+        (not retained_reject and event.presentation_id != shown.presentation_id) or
         event.button != ('accel' if event.kind == 'confirmationAccept' else 'decel')):
-      return None, None
+      return None, None, None
+    if engagement:
+      if (event.command_id != 0 or not _number(event.selected_mps, positive=True) or
+          not _number(float(sm['carState'].vCruise), positive=True) or
+          abs(float(sm['carState'].vCruise) / 3.6 - event.selected_mps) > 0.1):
+        return None, None, None
+    elif pending is None or event.decision_id != pending.decision_id or (not retained_reject and pending.candidate != shown.candidate):
+      return None, None, None
     action_id = self.ledger.last_action_id + 1
-    begun = arb.step(self.ledger, arb.BeginAction(self.session_id, action_id, arb.Origin.DRIVER_CRUISE,
-                                                  f'pending:{pending.decision_id}'), now_ns=now_ns)
+    context = f'presentation:{shown.presentation_id}' if engagement else f'pending:{pending.decision_id}'
+    begun = arb.step(self.ledger, arb.BeginAction(self.session_id, action_id, arb.Origin.DRIVER_CRUISE, context), now_ns=now_ns)
     self.ledger = begun.state
     if begun.errors or begun.status != 'begun':
-      return None, None
+      return None, None, None
+    if engagement:
+      return None, acc.AdoptRequest(self.session_id, action_id, shown.presentation_id, shown.candidate), action_id
+    assert pending is not None
     kind = acc.ActionKind.ACCEPT if event.kind == 'confirmationAccept' else acc.ActionKind.REJECT
-    return acc.DriverAction(self.session_id, action_id, pending.decision_id, kind), action_id
+    return acc.DriverAction(self.session_id, action_id, pending.decision_id, kind), None, action_id
 
   def _command_receipt(self, event: CruiseEvent, sm, now_ns: int) -> None:
     if (event.kind not in ('commandApplied', 'commandRejected') or
@@ -360,6 +393,9 @@ class Runtime:
                      selfdrive.enabled and car_fresh and selfdrive_fresh)
     long_enabled = bool(car_fresh and controls_fresh and selfdrive_fresh and car_control_fresh and
                         selfdrive.enabled and sm['carControl'].enabled)
+    if 'aolAxisState' in sm.logMonoTime:
+      axis = current_axis(sm, now_ns=now_ns)
+      long_enabled = long_enabled and bool(axis is not None and axis.nativeAcknowledged and axis.desiredLongitudinal)
     lateral = bool(car_control_fresh and sm['carControl'].latActive and selfdrive_fresh)
     authority = _authority(CP, sm, host_long, lateral, long_enabled=long_enabled)
     authority = replace(authority, accelerator_override=bool(CP.openpilotLongitudinalControl and long_enabled and car_state.gasPressed))
@@ -370,11 +406,30 @@ class Runtime:
            if ego_valid else sd.SpeedPair(sd.DomainStatus.STALE if sm.logMonoTime.get("carState", 0) else sd.DomainStatus.UNKNOWN))
     host = comp.HostState(bool(CP.openpilotLongitudinalControl), host_long, bool(selfdrive.enabled and selfdrive_fresh),
                           bool(controls.forceDecel) if controls_fresh else True, False, selected, selected_cluster)
-    return comp.Frame(now_ns, self._observations(sm, CP, now_ns, now_boot_ns), self.settings.selection, authority,
+    observations = self._observations(sm, CP, now_ns, now_boot_ns)
+    frame = comp.Frame(now_ns, observations, self.settings.selection, authority,
                       self.settings.acceptance, self.settings.offsets,
                       sd.DomainStatus.VALID if car_fresh and selected_cluster is not None else sd.DomainStatus.STALE,
                       ego, bool(car_state.gasPressed) if car_fresh else False, host, action=action, adopt=adopt,
                       classified_cruise=classified, is_metric=self.is_metric, set_speed_ready=self._set_speed_ready(sm))
+    current = sel.select_limit(observations, self.settings.selection).observation.candidate
+    shown = self.state.acceptance.presentation
+    if self.advance.encounter is not None and shown is not None and current != self.last_received:
+      identity = self.state.acceptance.next_presentation_id
+      self.state = replace(self.state, acceptance=replace(self.state.acceptance,
+        presentation=acc.Presentation(identity, shown.candidate), next_presentation_id=identity+1))
+    if (adopt is not None and self.advance.encounter is not None and
+        adopt.candidate == self.last_received == current):
+      self.advance.use_current(adopt.candidate)
+      proposals = None
+    else:
+      proposals = self.advance.propose(observations, self.settings.selection, self.map_source.upcoming,
+        current_way_id=self.map_source.way_id, seconds=self.settings.advance_seconds,
+        speed_mps=float(car_state.vEgo) if ego_valid else None,
+        standstill=bool(getattr(car_state, 'standstill', False)) or str(getattr(car_state, 'gearShifter', '')) == 'reverse',
+        can_offer=self.settings.enabled and authority.can_control and not host.force_decel,
+        confirmation_active=authority.can_control, now_ns=now_ns)
+    return replace(frame, adoption_observations=proposals, confirmation_started_ns=self.advance.started_ns)
 
   def _action(self, request: Action | None, now_ns: int) -> tuple[acc.DriverAction | None, acc.AdoptRequest | None, int | None]:
     if request is None or request.session_id != self.session_id or request.kind not in ("accept", "reject", "adopt"):
@@ -383,7 +438,12 @@ class Runtime:
       return None, None, None
     self.last_ui_sequence = request.sequence_id
     shown = self.state.acceptance.presentation
-    if shown is None or shown.presentation_id != request.presentation_id:
+    if shown is None and request.kind == 'adopt':
+      shown = self.current_presentation
+    pending = self.state.acceptance.pending
+    retained_reject = (request.kind == 'reject' and request.presentation_id == 0 and
+                       pending is not None and request.decision_id == pending.decision_id)
+    if not retained_reject and (shown is None or shown.presentation_id != request.presentation_id):
       return None, None, None
     action_id = self.ledger.last_action_id + 1
     context = self.state.override.context
@@ -412,10 +472,24 @@ class Runtime:
       self._command_receipt(cruise_event, sm, now_ns)
     action, adopt, action_id = self._action(request, now_ns)
     if cruise_event is not None and request is None:
-      action, action_id = self._physical_action(cruise_event, sm, now_ns)
+      action, adopt, action_id = self._physical_action(cruise_event, sm, now_ns)
+    if (adopt is not None and self.advance.encounter is not None and self.last_received is not None and
+        (request is None or self.state.acceptance.pending is None)):
+      # Explicit adoption uses the current road, including SET over an old early prompt.
+      shown = acc.Presentation(adopt.presentation_id, self.last_received)
+      adopt = replace(adopt, candidate=shown.candidate)
+      self.state = replace(self.state, acceptance=replace(self.state.acceptance, presentation=shown, pending=None, timer_running=False,
+        observation=acc.Observation(acc.ObservationKind.VALID, shown.candidate)))
     frame = self._frame(sm, CP, now_ns, now_boot_ns, action, adopt, classified)
     result = comp.step(self.state, frame)
     self.state = result.state
+    self.advance.observe(result)
+    if self.state.acceptance.presentation is None and self.advance.encounter is not None:
+      current = sel.select_limit(frame.observations, self.settings.selection).observation.candidate
+      if current is not None and (self.current_presentation is None or self.current_presentation.candidate != current):
+        identity = self.state.acceptance.next_presentation_id
+        self.current_presentation = acc.Presentation(identity, current)
+        self.state = replace(self.state, acceptance=replace(self.state.acceptance, next_presentation_id=identity+1))
     action_result = None
     if action_id is not None:
       if result.acceptance is not None:
@@ -500,6 +574,7 @@ class Runtime:
     record = command.slcCruiseCommand
     record.kind = 'adoptAcceptedLimit'
     record.source = result.selection.selected_source.value
+    record.upcomingBoundaryId = self.advance.boundary_id
     record.sessionId = self.session_id
     record.commandId = self.last_command_id
     record.actionId = action.sequence_id if action is not None else adopt.sequence_id if adopt is not None else 0
@@ -521,6 +596,7 @@ class Runtime:
     message.logMonoTime = now_ns
     message.valid = not result.errors
     state = message.slcState
+    current_selection = sel.select_limit(frame.observations, self.settings.selection)
     state.sessionId = self.session_id
     # Display metadata is copied from the same qualified inputs used by selection.
     enabled_sources = (set(self.settings.selection.slots) if self.settings.selection.mode == sel.SelectionMode.ORDERED
@@ -538,11 +614,14 @@ class Runtime:
     state.frameMonoTime = now_ns
     state.enabled = self.settings.enabled
     state.displayOnly = self.settings.display and not self.settings.enabled
-    state.observationKind = result.selection.observation.kind.value if result.selection is not None else "unknown"
-    state.source = result.selection.selected_source.value if result.selection is not None and result.selection.selected_source is not None else "none"
-    if result.selection is not None and result.selection.observation.candidate is not None:
-      state.speedLimit = result.selection.observation.candidate.speed_mps
-      self.last_received = result.selection.observation.candidate
+    state.observationKind = current_selection.observation.kind.value
+    state.source = current_selection.selected_source.value if current_selection.selected_source is not None else 'none'
+    if current_selection.observation.candidate is not None:
+      state.speedLimit = current_selection.observation.candidate.speed_mps
+      self.last_received = current_selection.observation.candidate
+    if self.advance.boundary_id and result.selection is not None and result.selection.observation.candidate is not None:
+      state.upcomingBoundaryId = self.advance.boundary_id
+      state.upcomingSpeedLimit = result.selection.observation.candidate.speed_mps
     accepted = result.state.acceptance.accepted
     if accepted is not None:
       state.hasAccepted = True
@@ -579,17 +658,20 @@ class Runtime:
     for candidate, value_field, flag_field in (
       (accepted.candidate if accepted is not None else None, 'acceptedAdjustedLimit', 'hasAcceptedAdjustedLimit'),
       (pending.candidate if pending is not None else None, 'pendingAdjustedLimit', 'hasPendingAdjustedLimit'),
-      (shown.candidate if shown is not None else None, 'presentationAdjustedLimit', 'hasPresentationAdjustedLimit'),
+      (current_selection.observation.candidate, 'presentationAdjustedLimit', 'hasPresentationAdjustedLimit'),
     ):
       value = (sd.adjusted_limit(candidate.speed_mps, self.settings.offsets, minimum_target_mps=ego_delta)
                if candidate is not None else None)
       if value is not None:
         setattr(state, value_field, value)
         setattr(state, flag_field, True)
-    if state.hasPresentationAdjustedLimit:
+    if state.hasPresentationAdjustedLimit and not self.advance.boundary_id:
       state.offset = float(state.presentationAdjustedLimit) - float(state.speedLimit)
-    if shown is not None:
+    # A retained choice gets an Accept presentation only when fresh evidence matches it.
+    if shown is not None and (pending is None or pending.candidate == shown.candidate):
       state.presentationId = shown.presentation_id
+    elif pending is None and self.current_presentation is not None and self.current_presentation.candidate == current_selection.observation.candidate:
+      state.presentationId = self.current_presentation.presentation_id
     state.status = result.status
     if state.source == 'dashboard' and state.observationKind == 'valid':
       evidence = sm['slcDashboardObservation']

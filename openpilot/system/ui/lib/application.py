@@ -668,6 +668,8 @@ class GuiApplication:
         self._render_profiler.enable()
 
       while not (self._window_close_requested or rl.window_should_close()):
+        if self._frame % self._target_fps == 0:
+          multilang.refresh_language()
         frame_start = time.monotonic()
         collect_timing = self._frame_timing_enabled or frame_start < self._auto_timing_end
         self._collect_frame_timing = collect_timing
@@ -806,6 +808,9 @@ class GuiApplication:
                                rl.ffi.cast("int *", codepoint_buffer), len(codepoints))
       rl.gen_texture_mipmaps(font.texture)
       rl.set_texture_filter(font.texture, rl.TextureFilter.TEXTURE_FILTER_TRILINEAR)
+      for previous in self._fallback_fonts.values():
+        rl.unload_font(previous)
+      self._fallback_fonts.clear()
       self._fallback_fonts[language] = font
     return self._fallback_fonts[language]
 

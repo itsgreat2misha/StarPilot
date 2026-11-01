@@ -26,8 +26,8 @@ from opendbc.car.hyundai.ray_pedal import create_ray_pedal_command, ray_pedal_ga
 from opendbc.car.hyundai.ioniq6_longitudinal import Ioniq6LongitudinalPolicy
 from opendbc.car.hyundai.canfd_dash_icons import CanFDDashIcons
 from opendbc.car.hyundai.classic_scc_aol import qualified as qualified_classic_stock_aol
-from opendbc.car.hyundai.classic_long_aol import independent_buttons_qualified as qualified_classic_long_buttons
-from opendbc.car.hyundai.canfd_stock_aol import qualified as qualified_canfd_stock_aol
+from opendbc.car.hyundai.classic_long_aol import AOL_EXPERIENCE, qualified as qualified_classic_long_aol
+from opendbc.car.hyundai.canfd_stock_aol import qualified as qualified_canfd_stock_aol, qualified_long as qualified_canfd_long_aol
 from opendbc.car.hyundai.ev6_aol import qualified as qualified_ev6_aol
 from opendbc.car.hyundai.g90_longitudinal import G90LongitudinalPolicy
 from opendbc.car.hyundai.gv70_longitudinal import is_gv70, scc_request, suppress_stock_cancel
@@ -77,7 +77,7 @@ def angle_torque_reduction_gain(steering_torque, v_ego, lat_active, last_gain):
 
 def classic_aol_dash_enabled(cp):
   return bool(cp.carFingerprint != CAR.KIA_RAY_EV and (qualified_classic_stock_aol(cp, marked_only=True) or
-    cp.carFingerprint == CAR.HYUNDAI_ELANTRA_2021 and qualified_classic_long_buttons(cp, marked_only=True)))
+    cp.alternativeExperience == AOL_EXPERIENCE and qualified_classic_long_aol(cp, marked_only=True)))
 
 
 def process_hud_alert(enabled, fingerprint, hud_control):
@@ -157,7 +157,9 @@ class CarController(CarControllerBase):
     ioniq6_status = (self.ioniq6_longitudinal is not None and
                      int(CP.safetyConfigs[-1].safetyParam) in (0x8015, 0x8095, 0x8815, 0x8895))
     self.ioniq6_bsm_enabled = ioniq6_status
-    self.ev6_aol_status = CP.carFingerprint == CAR.KIA_EV6 and (qualified_canfd_stock_aol(CP) or qualified_ev6_aol(CP))
+    self.ev6_aol_status = ((CP.carFingerprint == CAR.KIA_EV6 and (qualified_canfd_stock_aol(CP) or qualified_ev6_aol(CP))) or
+                           (CP.carFingerprint == CAR.KIA_SPORTAGE_5TH_GEN and
+                            (qualified_canfd_stock_aol(CP) or qualified_canfd_long_aol(CP))))
     self.canfd_dash_icons = CanFDDashIcons() if ioniq6_status or self.torque_ev_scc_enabled or self.ev6_aol_status else None
     self.classic_dash_icons = CanFDDashIcons() if classic_aol_dash_enabled(CP) else None
     self.classic_lfa_icon = None

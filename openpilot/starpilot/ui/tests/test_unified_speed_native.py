@@ -49,6 +49,7 @@ def fonts(profile=Profile.LARGE):
 
 def slc_view(font):
   view = OnroadView.__new__(OnroadView)
+  view.personality = Mock()
   view.fonts = font
   if font.profile == Profile.LARGE:
     view.unified_speed = UnifiedSpeedWidget(font)
@@ -73,6 +74,18 @@ def test_latest_limit_and_offset_replace_accepted_sign_while_waiting():
   shown = resolve_unified_speed(state())
   assert (shown.max_text, shown.posted_text, shown.offset_text, shown.source) == ('100', '50', '+5', 'map')
   assert displayed_limit_mps(state().speed_limit) == 50 / 3.6
+
+
+@pytest.mark.parametrize('profile', list(Profile))
+def test_confirmation_arrow_uses_upcoming_target_while_current_reading_stays_current(profile, drawing):
+  current = state()
+  current = replace(current, speed_limit=replace(current.speed_limit,
+    pending_speed_limit_mps=30 / 3.6, pending_adjusted_limit_mps=35 / 3.6))
+  font = fonts(profile)
+  SpeedLimitWidget(font, profile).render_confirmation(current)
+  assert drawing['arrow'].call_args.args[3] == 1
+  assert '30' in [call.args[0] for call in font.draw.call_args_list]
+  assert current.speed_limit.speed_limit_mps == 50 / 3.6
 
 
 @pytest.mark.parametrize('profile', list(Profile))
@@ -279,6 +292,18 @@ def test_compact_max_restores_dinish_number_label_and_shadow(drawing):
   drawing['draw_circle_gradient'].assert_called_once()
 
 
+@pytest.mark.parametrize('metric', [False, True])
+@pytest.mark.parametrize('engaged', [False, True])
+def test_compact_unset_max_stays_hidden(metric, engaged, drawing):
+  font = fonts(Profile.COMPACT)
+  hud = CompactHudRenderer(font, Mock())
+  current = state(metric=metric, engaged=engaged, longitudinal_active=engaged, cruise_kph=None, drive_frame=1)
+  hud.render_max_speed(current)
+  hud.render_max_speed(replace(current, observed_ns=current.observed_ns + 20_000_000))
+  font.draw.assert_not_called()
+  drawing['draw_circle_gradient'].assert_not_called()
+
+
 def test_large_limit_keeps_a_unit_when_set_speed_is_hidden():
   profile = Profile.LARGE
   current = state()
@@ -294,6 +319,7 @@ def test_large_limit_keeps_a_unit_when_set_speed_is_hidden():
 @pytest.mark.parametrize('profile', list(Profile))
 def test_chooser_has_separate_tonal_actions_and_immediate_pressed_feedback(profile, drawing):
   view = OnroadView.__new__(OnroadView)
+  view.personality = Mock()
   view.fonts = fonts(profile)
   if profile == Profile.LARGE:
     view.unified_speed = UnifiedSpeedWidget(view.fonts)

@@ -75,14 +75,19 @@ def displayed_adjusted_limit_mps(observation):
   return posted + (observation.offset_mps or 0)
 
 
-def resolve_unified_speed(state) -> UnifiedSpeedPresentation:
+def resolve_unified_speed(state, *, confirmation=False) -> UnifiedSpeedPresentation:
   obs = state.speed_limit
   factor = 3.6 if state.metric else 2.2369362921
   def speed(value):
     return str(round(value * factor)) if positive(value) else '–'
   posted = displayed_limit_mps(obs)
   target = displayed_adjusted_limit_mps(obs)
-  pending = str(obs.kind) == 'valid' and positive(obs.pending_speed_limit_mps)
+  pending = positive(obs.pending_speed_limit_mps)
+  if confirmation and pending:
+    posted = obs.pending_speed_limit_mps
+    target = obs.pending_adjusted_limit_mps
+    if not positive(target):
+      target = posted + (obs.offset_mps or 0)
   show_max = state.customization.get('showMaxSpeed', True)
   has_slc = positive(posted) or str(obs.kind) == 'stale'
   mode = 'split' if show_max and has_slc else 'limit_only' if has_slc else 'max_only' if show_max else 'hidden'
@@ -92,7 +97,8 @@ def resolve_unified_speed(state) -> UnifiedSpeedPresentation:
     if adjustment:
       offset = f'{adjustment:+d}'
   status = 'Cruise off'
-  if getattr(obs, 'status', '') == 'display_hold' or str(obs.kind) != 'valid' and positive(obs.last_received_speed_limit_mps):
+  if (getattr(obs, 'status', '') == 'display_hold' or pending and obs.presentation_id == 0 or
+      str(obs.kind) != 'valid' and positive(obs.last_received_speed_limit_mps)):
     status = 'Unavailable'
   elif not obs.action_enabled:
     status = 'Display only'
@@ -107,6 +113,8 @@ def resolve_unified_speed(state) -> UnifiedSpeedPresentation:
   max_text = speed(state.cruise_kph / 3.6) if positive(state.cruise_kph) else '–'
   source = obs.source if str(obs.kind) == 'valid' else (
     obs.last_received_source if positive(obs.last_received_speed_limit_mps) else obs.accepted_source)
+  if confirmation and pending and obs.pending_source not in ('', 'none'):
+    source = obs.pending_source
   proposal = None
   if pending:
     proposal = obs.pending_adjusted_limit_mps or (

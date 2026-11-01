@@ -126,7 +126,6 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
 
   address_source = local_access if local_access is not None else LocalAccess(port)
   console_source = tmux_live if tmux_live is not None else TmuxLive()
-  monitor_source = monitor if monitor is not None else SystemMonitor()
   reports = crashes if crashes is not None else CrashReports()
   crash_reports_lock = threading.Lock()
   starport_logs_source = starport_logs
@@ -175,6 +174,18 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
     from openpilot.starpilot.galaxy.evidence import EvidenceSource
     evidence_source = EvidenceSource()
 
+  monitor_source = monitor if monitor is not None else SystemMonitor(messages=evidence_source)
+  weather_source = None
+  weather_lock = threading.Lock()
+
+  def weather_status():
+    nonlocal weather_source
+    with weather_lock:
+      if weather_source is None:
+        from openpilot.starpilot.galaxy.weather import WeatherSource
+        weather_source = WeatherSource()
+        server.weather_source = weather_source
+      return weather_source.sample()
   vehicle_display = DeviceStateSource(evidence_source)
 
   def context_source(params):
@@ -740,6 +751,13 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
                         **({'gatewayAccess': True} if getattr(self.server, 'remote_transport', False) else {}),
                         'state': 'configured' if status == AccessStatus.CONFIGURED_LOCAL else
                                  'unavailable' if status == AccessStatus.UNAVAILABLE else 'setup_required'})
+      elif path == '/api/localization':
+        if not self.require_session():
+          return
+        from openpilot.common.params import Params
+        from openpilot.starpilot.galaxy.localization import language_snapshot
+        previous = parse_qs(urlsplit(self.path).query).get('language', [''])[0]
+        self.json(200, language_snapshot(Params(), previous))
       elif path == '/api/galaxy/device-name':
         if not self.require_session():
           return
@@ -873,6 +891,12 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
             self.json(200, result)
           else:
             self.json(401, {'error': 'Sign in to Galaxy'})
+      elif path == '/api/weather':
+        if not self.require_session():
+          return
+        result = weather_status()
+        if self.require_session():
+          self.json(200, result)
       elif path == '/api/system/monitor':
         if not self.require_session():
           return

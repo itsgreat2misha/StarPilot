@@ -271,6 +271,7 @@ class LongitudinalPlanner:
                     follow_seconds=follow if follow is not None else
                     (self.last_profile.follow_seconds if self.last_profile is not None else None),
                     acceleration_max=acceleration_cap,
+                    extra_stopped_gap_m=(selected_profiles.extra_stopped_gap_m if profile_eligible and selected_profiles is not None else 0.0),
                     stop_line_m=self.force_stop_plan.obstacle_m, modelV2=qualified_model_leads(sm, sample_now_ns, self.model_lead_history))
 
     # MPC has selected the actual follow time for this model cycle. Its solve
@@ -335,6 +336,12 @@ class LongitudinalPlanner:
       fallback=should_stop(v_ego, output_a_target_mpc))
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
+    if (self.force_stop_plan.resume_override and not self.force_stop_plan.forcing and
+        not self.force_stop_plan.should_stop and not reset_state and not self.fcw and self.allow_throttle and
+        abs(v_ego) < 2.0 and v_cruise > 0.3 and self.mpc.solution_status == 0 and
+        not any(lead.present for lead in (sm['radarState'].leadOne, sm['radarState'].leadTwo))):
+      output_a_target_e2e = max(output_a_target_e2e, 0.2)
+      output_should_stop_e2e = False
 
     relevant_lead = any(braking_lead_relevant(lead, v_ego) for lead in
                         (sm['radarState'].leadOne, sm['radarState'].leadTwo))

@@ -11,6 +11,34 @@ from openpilot.starpilot.ui.onroad_state import AlertSize, OnroadAlert, OnroadIn
 from openpilot.starpilot.ui.presentation import Profile
 from openpilot.starpilot.ui.tests.test_slc_ui_actions import state, tap_sign, tap_control
 from openpilot.starpilot.ui.onroad_state import SlcActionKind
+from openpilot.starpilot.ui.unified_speed_presentation import resolve_unified_speed
+
+
+@pytest.mark.parametrize('profile', list(Profile))
+@pytest.mark.parametrize('source_available', [False, True])
+def test_source_gap_keeps_open_card_with_reject_but_no_accept(profile, source_available):
+  from openpilot.starpilot.ui.onroad_state import ObservationKind
+  current, emitted = state(), []
+  touch = OnroadInput(emitted.append, profile)
+  tap_sign(touch, current)
+  before = speed_limit_bounds(profile, touch.present(current))
+  missing = replace(current, speed_limit=replace(current.speed_limit,
+    kind=ObservationKind.VALID if source_available else ObservationKind.UNKNOWN,
+    speed_limit_mps=22. if source_available else None, presentation_id=0,
+    last_received_speed_limit_mps=22., last_received_source='dashboard'))
+  assert resolve_unified_speed(missing, confirmation=True).status == 'Unavailable'
+  assert manual_slc_confirmation(profile, missing)
+  assert touch.present(missing).slc_prompt_open
+  assert speed_limit_bounds(profile, touch.present(missing)) == before
+  accept, reject = slc_controls(profile, touch.present(missing))
+  assert not accept.enabled and reject.enabled
+  tap_control(touch, missing, SlcActionKind.ACCEPT)
+  assert not emitted and touch.present(missing).slc_prompt_open
+  recovered = replace(current, speed_limit=replace(current.speed_limit, presentation_id=10))
+  assert touch.present(recovered).slc_prompt_open
+  touch.present(missing)
+  tap_control(touch, missing, SlcActionKind.REJECT)
+  assert [r.kind for r in emitted] == [SlcActionKind.REJECT]
 
 
 @pytest.mark.parametrize('profile', list(Profile))
@@ -40,10 +68,30 @@ def test_closed_and_open_card_share_anchor_and_physically_scaled_targets(profile
 
 
 @pytest.mark.parametrize('profile', list(Profile))
+@pytest.mark.parametrize('lateral', [False, True])
+def test_disengaged_and_aol_views_cancel_confirmation_but_keep_the_sign(profile, lateral):
+  current, emitted = state(), []
+  touch = OnroadInput(emitted.append, profile)
+  tap_sign(touch, current)
+  assert touch.present(current).slc_prompt_open
+  inactive = replace(current, longitudinal_active=False, lateral_active=lateral)
+  assert not manual_slc_confirmation(profile, inactive)
+  assert not touch.present(inactive).slc_prompt_open
+  assert not slc_controls(profile, inactive)
+  assert speed_limit_bounds(profile, inactive) is not None
+  assert not emitted
+
+
+@pytest.mark.parametrize('profile', list(Profile))
+def test_accelerator_override_keeps_confirmation_visible(profile):
+  current = replace(state(), longitudinal_active=False, longitudinal_overridden=True)
+  assert manual_slc_confirmation(profile, current)
+
+
+@pytest.mark.parametrize('profile', list(Profile))
 @pytest.mark.parametrize('action', [SlcActionKind.ACCEPT, SlcActionKind.REJECT])
 def test_touch_choice_remains_available_without_wheel_confirmation(profile, action):
-  current = replace(state(), longitudinal_active=False, slc_system_long_available=False,
-                    slc_wheel_confirmation_available=False)
+  current = replace(state(), slc_wheel_confirmation_available=False)
   emitted = []
   touch = OnroadInput(emitted.append, profile)
   tap_sign(touch, current)

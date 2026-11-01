@@ -4,6 +4,7 @@ from itertools import product
 import io
 import re
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from PIL import Image
 import numpy as np
@@ -80,6 +81,7 @@ def test_toyota_guidance_preserves_primary_legibility_and_fits_the_action_area()
     for profile in Profile:
       with BitmapFonts(profile, default_font_directory()) as fonts:
         view = OnroadView.__new__(OnroadView)
+        view.personality = Mock()
         view.fonts = fonts
         ppi = (2160**2 + 1080**2)**.5 / 6 if profile == Profile.LARGE else 300
         for metric, status in product((False, True), ('raise_dash', 'release_plus', 'off_hold', 'off_resume')):
@@ -125,7 +127,7 @@ def test_large_sign_is_secondary_to_set_speed_at_the_saved_position():
         current = replace(current, metric=metric, cruise_kph=value / factor * 3.6 if value else None,
                           speed_limit=observation)
         calls = []
-        with patch.object(fonts, 'draw', lambda *args, calls=calls: calls.append(args)):
+        with patch.object(fonts, 'draw', lambda *args, calls=calls: calls.append(args)), patch.object(rl, 'draw_line_ex') as lines:
           UnifiedSpeedWidget(fonts).render(rl.Rectangle(30, 30, 1800, 1020), current)
         calls = [call for call in calls if call[-1].a == 255]
         posted = next(call for call in calls if call[0] == '120' and call[1] == FontRole.SET_SPEED)
@@ -136,7 +138,7 @@ def test_large_sign_is_secondary_to_set_speed_at_the_saved_position():
         assert b - a == pytest.approx(60, abs=.1)
         assert abs(posted[4]+(a+b)/2-(95+67*1.25)) <= .5
         set_calls = [call for call in calls if call[1] == FontRole.SET_SPEED and call[3] < 388]
-        assert bool(set_calls) == show_set
+        assert bool(set_calls) == (show_set and value is not None)
         if set_calls:
           text, role, size, x, y, _ = set_calls[0]
           assert fonts.measure(text, role, size).width <= 200
@@ -144,14 +146,18 @@ def test_large_sign_is_secondary_to_set_speed_at_the_saved_position():
           assert x + (left + right) / 2 == pytest.approx(308)
           assert x + right + 20 <= 418
           top, bottom = fonts.vertical_ink(text, role, size)
-          if value is not None:
-            assert bottom - top == pytest.approx(88, abs=1)
-            assert y + (top + bottom) / 2 == pytest.approx(196)
-          else:
-            assert y + top + size * fonts.profile.font_scale * 15 / 400 == pytest.approx(196)
+          assert bottom - top == pytest.approx(88, abs=1)
+          assert y + (top + bottom) / 2 == pytest.approx(196)
           unit = next(call for call in calls if call[0] == ('km/h' if metric else 'mph'))
           assert unit[2] == 28
           assert unit[4] + fonts.vertical_ink(unit[0], unit[1], unit[2])[1] + 12 <= y + top
+        if show_set and value is None:
+          start, end, stroke, color = lines.call_args.args
+          assert (start.x, start.y, end.x, end.y, stroke) == (280, 196, 336, 196, 8)
+          assert (color.r, color.g, color.b, color.a) == (190, 208, 202, 255)
+          assert all(call[0] not in ('–', '?') for call in calls)
+        else:
+          lines.assert_not_called()
   finally:
     if owns_context:
       rl.close_window()
@@ -351,6 +357,7 @@ def test_large_sources_and_confirmation_text_have_clearance_below_both_signs():
     with BitmapFonts(Profile.LARGE, default_font_directory()) as fonts:
       widget = UnifiedSpeedWidget(fonts)
       view = OnroadView.__new__(OnroadView)
+      view.personality = Mock()
       view.fonts = fonts
       view.unified_speed = widget
       for vienna, separate in product((False, True), repeat=2):
@@ -393,6 +400,7 @@ def test_source_card_action_sprite_contains_both_actual_button_rows():
       document = validate_document(document)
       state = sample_state('slc_pending', document)
       view = OnroadView.__new__(OnroadView)
+      view.personality = Mock()
       view.fonts = fonts
       from openpilot.starpilot.ui.onroad_large_widgets import UnifiedSpeedWidget
       view.unified_speed = UnifiedSpeedWidget(fonts)
