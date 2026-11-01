@@ -71,6 +71,39 @@ def update(helper, cs, approved=None, *, enabled=True, slc=True, metric=True, pe
   helper.update_v_cruise(cs, enabled, metric, pending, slc_enabled=slc, slc_approved=approved)
 
 
+def test_upcoming_approval_keeps_native_capacity_and_release_checks(helper):
+  approved = approval(70.)
+  approved.speedLimit = 50./3.6
+  approved.upcomingSpeedLimit = 70./3.6
+  approved.upcomingBoundaryId = 'a' * 64
+  update(helper, state(native=60.), approved)
+  assert helper.toyota.status == 'raise_dash'
+  update(helper, state(native=80., button='accelCruise', pressed=True), approved)
+  assert helper.toyota.status == 'release_plus'
+  update(helper, state(native=80., button='accelCruise', pressed=False), approved)
+  assert helper.toyota.status == 'ready' and helper.toyota.can_apply(70./3.6)
+
+
+@pytest.mark.parametrize('resume', [False, True, None], ids=['set', 'resume-hint', 'resume-button'])
+def test_engagement_adoption_waits_for_native_capacity_and_release(helper, resume):
+  helper.toyota.engaged = False
+  cs = state(native=60., button='decelCruise' if resume is False else 'accelCruise')
+  update(helper, cs)
+  before = helper.v_cruise_kph
+  assert helper.initialize_v_cruise(cs, False, resume=resume, slc_target_mps=70 / 3.6, is_metric=True)
+  assert helper.v_cruise_kph == before  # Existing Toyota preparation owns application.
+  approved = approval(70.)
+  approved.actionStatus, approved.actionSequenceId = 'adopt', 1
+  update(helper, state(native=60.), approved)
+  assert helper.toyota.status == 'raise_dash' and not helper.toyota.can_apply(70 / 3.6)
+  update(helper, state(native=80., button='accelCruise'), approved)
+  assert helper.toyota.status == 'release_plus'
+  update(helper, state(native=80., button='accelCruise', pressed=False), approved)
+  assert helper.toyota.status == 'ready' and helper.toyota.can_apply(70 / 3.6)
+  helper.apply_slc_target(70 / 3.6, True)
+  assert helper.v_cruise_kph == 70. and helper.slc_cruise_change is None
+
+
 @pytest.fixture(params=[False, True], ids=['normal-steps', 'swapped-steps'])
 def swap(helper, tmp_path, request):
   params = Params(str(tmp_path))

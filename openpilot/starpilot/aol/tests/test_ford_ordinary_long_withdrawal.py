@@ -18,7 +18,7 @@ def caller():
     fingerprint[0] = {0x5A: 8, 0x3A6: 8, 0x3A7: 8}
     cp = CarInterface.get_params(CAR.FORD_MUSTANG_MACH_E_MK1, fingerprint, [], True, False, False)
     cp.alternativeExperience = 32
-    assert cp.safetyConfigs[-1].safetyParam == 19 and cp.flags == 3
+    assert cp.safetyConfigs[-1].safetyParam == 3 and cp.flags == 3
     sd, controls, step = case._authority_callers(True, cp=cp, genuine_events=True)
     cs = fixture.car_state()
     cs.cruiseState.enabled = True
@@ -96,3 +96,18 @@ def test_persistent_native_long_denial_keeps_original_mismatch_owner(caller, ste
       break
   assert sd.mismatch_counter >= 200
   assert not s.enabled and not a.lateralActive and not c.latActive
+
+
+@pytest.mark.parametrize('steering', [False, True])
+def test_fresh_physical_gas_after_prior_deadline_uses_current_grant(caller, steering):
+  sd, cs, drive = caller
+  prior = list(sd.aol_published_input_proof)
+  prior[3] = 10_099_999_999
+  sd.aol_published_input_proof = tuple(prior)
+  cs.gasPressed = True
+  axis, state, command = drive(10, gas=True, steering=steering, native_request_lat=True,
+    allowed=True, native_request_long=True, long_allowed=False, panda_controls_allowed=True)
+  assert axis.lateralActive and command.latActive and state.enabled
+  assert not axis.longitudinalActive and not command.longActive
+  assert not sd.aol_last_intent.allowedLatch and not sd.aol_last_intent.lateralArmed
+  assert log.OnroadEvent.EventName.controlsMismatch not in sd.events.names

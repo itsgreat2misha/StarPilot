@@ -60,6 +60,7 @@ from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_drivi
 from openpilot.selfdrive.modeld.constants import LAT_SMOOTH_SECONDS, ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import MODELS_DIR, chestnut_present, modeld_pkl_path, load_oob, wait_for_chestnut
 
+
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 
 LONG_SMOOTH_SECONDS = 0.3

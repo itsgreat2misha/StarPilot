@@ -6,11 +6,11 @@ from typing import cast
 import pyray as rl
 
 from openpilot.starpilot.ui.large_speed_geometry import LARGE_SIGN_SCALE, CONFIRMATION_SCALE, CONFIRMATION_PADDING
-from openpilot.starpilot.ui.onroad_state import OnroadState, manual_slc_confirmation, speed_limit_bounds, slc_controls
+from openpilot.starpilot.ui.onroad_state import OnroadState, manual_slc_confirmation, speed_limit_bounds, slc_controls, slc_accept_available
 from openpilot.starpilot.ui.presentation import BitmapFonts, FontRole, Profile
 from openpilot.starpilot.ui.speed_limit_pulse import SpeedLimitPulse
 from openpilot.starpilot.ui.speed_limit_shapes import SpeedLimitShapes
-from openpilot.starpilot.ui.unified_speed_presentation import displayed_adjusted_limit_mps, resolve_unified_speed
+from openpilot.starpilot.ui.unified_speed_presentation import displayed_adjusted_limit_mps, positive, resolve_unified_speed
 
 
 INK = rl.Color(241, 246, 243, 255)
@@ -95,7 +95,7 @@ class SpeedLimitWidget:
     scale = CONFIRMATION_SCALE[self.profile]
     x, y, right, _ = bounds
     width = (right - x) / scale
-    shown = resolve_unified_speed(state)
+    shown = resolve_unified_speed(state, confirmation=True)
     source = SOURCE_LABELS.get(shown.source, 'SPEED')
     white = rl.Color(242, 246, 244, 255)
     secondary = rl.Color(209, 222, 218, 255)
@@ -134,6 +134,8 @@ class SpeedLimitWidget:
       for control, (fill, border, ink) in zip(slc_controls(self.profile, state), (
           ((35, 74, 57), (106, 153, 127), (224, 243, 232)),
           ((77, 46, 57), (173, 122, 134), (248, 229, 234))), strict=True):
+        if not control.enabled:
+          fill, border, ink = (43, 49, 48), (94, 105, 101), (161, 174, 168)
         left = (control.bounds[0] - x) / scale
         top = (control.bounds[1] - y) / scale
         w, h = (control.bounds[2] - control.bounds[0]) / scale, (control.bounds[3] - control.bounds[1]) / scale
@@ -148,7 +150,9 @@ class SpeedLimitWidget:
     self.shapes.confirmation(bounds, strength=self.pulse.confirmation_strength(now))
     source_color = rl.Color(197, 212, 208, 255)
     label_width = ink_width(source, 22, FontRole.SEMI_BOLD)
-    target = displayed_adjusted_limit_mps(state.speed_limit)
+    target = state.speed_limit.pending_adjusted_limit_mps
+    if not positive(target):
+      target = displayed_adjusted_limit_mps(state.speed_limit)
     direction = (-1 if target > state.speed_mps else 1) if target is not None and state.speed_mps is not None and target != state.speed_mps else 0
     start = (width - label_width - (19.2 if direction else 0)) / 2
     text(source, 22, start + label_width / 2, 22, source_color, FontRole.SEMI_BOLD)
@@ -165,10 +169,11 @@ class SpeedLimitWidget:
       offset_text = cast(str, shown.offset_text)
       top, bottom = self.fonts.vertical_ink(offset_text, FontRole.MEDIUM, text_size(32))
       text(offset_text, 32, start + nw + 10 + ow / 2, 84 - (bottom - top) / scale / 2, secondary)
-    caption = ink_width('New Limit', 30, FontRole.SEMI_BOLD)
+    label = 'New Limit' if slc_accept_available(state) else 'Unavailable'
+    caption = ink_width(label, 30, FontRole.SEMI_BOLD)
     cx = (width - caption - 10) / 2
     accent = rl.Color(214, 188, 240, 255)
-    text('New Limit', 30, cx + caption / 2, 104, accent, FontRole.SEMI_BOLD)
+    text(label, 30, cx + caption / 2, 104, accent, FontRole.SEMI_BOLD)
     ax, ay = x + (cx + caption + 8) * scale, y + 104 * scale
     rl.draw_line_ex(rl.Vector2(ax - 2 * scale, ay - 4 * scale), rl.Vector2(ax + 2 * scale, ay), 1.5 * scale, accent)
     rl.draw_line_ex(rl.Vector2(ax + 2 * scale, ay), rl.Vector2(ax - 2 * scale, ay + 4 * scale), 1.5 * scale, accent)
@@ -178,7 +183,7 @@ class SpeedLimitWidget:
       for left, plus in ((start, True), (start + 18 + 4 + accept + 10, False)):
         self.shapes.wheel_key(plus, x + (left + 9) * scale, y + 135.5 * scale, scale=scale)
       hint_ink = rl.Color(210, 216, 216, 255)
-      text('Accept', 26, start + 22 + accept / 2, 135.5, hint_ink)
+      text('Accept', 26, start + 22 + accept / 2, 135.5, hint_ink if slc_accept_available(state) else MUTED)
       text('Reject', 26, start + 18 + 4 + accept + 10 + 22 + reject / 2, 135.5, hint_ink)
 
   def _sign(self, state: OnroadState, bounds, now: float) -> None:

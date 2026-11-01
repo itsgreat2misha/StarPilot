@@ -622,7 +622,7 @@ class RuntimeReplayTests(unittest.TestCase):
       {'carControl': car.CarControl(enabled=True, longActive=True), 'slcState': state.slcState,
        'deviceState': SimpleNamespace(startedMonoTime=1)}, now_ns - 10_000_000))
     self.enterContext(mock.patch.object(fake, 'CI', SimpleNamespace(
-      CS=SimpleNamespace(dashboard_limit=SimpleNamespace(observation=observation)),
+      CC=None, CS=SimpleNamespace(dashboard_limit=SimpleNamespace(observation=observation)),
       update=lambda packets: car.CarState(canValid=True, cruiseState={'available': True})), create=True))
     self.enterContext(mock.patch.object(fake, 'RI', SimpleNamespace(update=lambda packets: None), create=True))
     with (mock.patch.object(card.messaging, 'drain_sock_raw', return_value=[]),
@@ -810,7 +810,7 @@ class RuntimeReplayTests(unittest.TestCase):
     current_cs = [car.CarState(canValid=True, cruiseState={'available': True},
                                buttonEvents=[car.CarState.ButtonEvent(type='accelCruise', pressed=True)])]
     self.enterContext(mock.patch.object(fake, 'CI', SimpleNamespace(
-      CS=SimpleNamespace(dashboard_limit=SimpleNamespace(observation=observation) if observation is not None else None),
+      CC=None, CS=SimpleNamespace(dashboard_limit=SimpleNamespace(observation=observation) if observation is not None else None),
       update=lambda packets: current_cs[0]), create=True))
     self.enterContext(mock.patch.object(fake, 'RI', SimpleNamespace(update=lambda packets: None), create=True))
     return fake, current_cs
@@ -1116,7 +1116,6 @@ class RuntimeReplayTests(unittest.TestCase):
       params.put('SLCFallback', 2, block=True)
       params.put('SLCPriority1', 'Map Data', block=True)
       params.put('SLCPriority2', 'Dashboard', block=True)
-      params.put('Offset3', 5.0, block=True)
       restored = read_params(params)
       self.assertTrue(restored.enabled)
       self.assertTrue(restored.acceptance.confirm_lower)

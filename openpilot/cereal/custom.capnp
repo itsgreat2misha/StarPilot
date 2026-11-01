@@ -342,6 +342,9 @@ struct SlcState @0xa1680744031fdb2d {
   lastReceivedSource @54 :Text;
   lastReceivedAdjustedLimit @55 :Float32;
   acceptedMonoTime @56 :UInt64;
+  # Qualified adoption proposal; the current displayed observation stays above.
+  upcomingSpeedLimit @57 :Float32;
+  upcomingBoundaryId @58 :Text;
   struct SourceReading {
     source @0 :Text;
     enabled @1 :Bool;
@@ -532,6 +535,7 @@ struct SlcCruiseEvent @0xcd96dafb67a082d0 {
     switchbackMode @9;
     wheelAction @10;
     teslaStockCruise @11;
+    engagementAdopt @12;
   }
 
   struct TrafficModeGesture {
@@ -890,6 +894,7 @@ struct SlcCruiseCommand @0xbd443b539493bc68 {
   expectedSelectedMps @12 :Float32;
   targetMps @13 :Float32;
   source @14 :Text;
+  upcomingBoundaryId @15 :Text;
 
   enum Kind {
     unknown @0;
@@ -1157,6 +1162,11 @@ struct MapdOut @0xa4f1eb3323f5f582 {
   computedMonoTime @31 :UInt64; # Computation boot-time nanoseconds, not send time.
   sourceGeneration @32 :UInt64;
   producerSession @33 :UInt64;  # Random nonzero process session.
+  # Data-only preview from the same qualified GPS fix; no controller smoothing.
+  previewSpeedLimit @34 :Float32;
+  previewDistance @35 :Float32;
+  previewBoundaryId @36 :Text;
+  previewWayId @37 :Int64;
 
   enum SampleStatus {
     unknown @0;

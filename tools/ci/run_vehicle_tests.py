@@ -21,13 +21,26 @@ sys.path.insert(0, str(ROOT))
 from tools import test_runner
 from tools.ci import lifecycle_shards, vehicle_pytest
 
+FORD_BLUEPILOT_TARGETS = (
+  'openpilot/starpilot/tests/test_ford_bluepilot_library_lifecycle.py',
+  'openpilot/starpilot/tests/test_ford_first_gas_grant.py',
+  'openpilot/starpilot/tests/test_ford_temporary_eps_intent.py',
+  'openpilot/starpilot/tests/test_ford_reverse_native_echo.py',
+  'openpilot/starpilot/tests/test_bluepilot_vendor_pin.py',
+  'opendbc_repo/opendbc/safety/tests/test_ford_bluepilot_hooks.py',
+  *(str(path.relative_to(ROOT))
+    for path in sorted((ROOT / 'opendbc_repo/opendbc/bluepilot_lateral/tests').glob('test_*.py'))),
+)
+
+# Ordinary native suites include inherited, intentionally unsupported cases; RELEASE preserves those skips.
+FORD_BLUEPILOT_NATIVE_TARGETS = tuple(str(path.relative_to(ROOT)) for path in sorted(
+  (ROOT / 'opendbc_repo/opendbc/bluepilot_lateral/safety/tests').glob('test_*.py')))
+
 # Representative production callers plus their source/native refusal cases.
 # The emitted selected_test_ids record exact parametrized configurations.
 AOL_LIFECYCLE_TARGETS = (
+  "openpilot/starpilot/aol/tests/test_gv60_hda1_alpha_aol.py",
   "opendbc_repo/opendbc/car/hyundai/tests/test_torque_ev_deferred_takeover.py",
-  'openpilot/starpilot/tests/test_ford_bluepilot_aol.py',
-  'opendbc_repo/opendbc/bluepilot_lateral/tests/test_angle_core.py',
-  'opendbc_repo/opendbc/safety/tests/test_ford_bluepilot_aol.py',
   'openpilot/starpilot/aol/tests/test_hkg_early_long_withdrawal.py',
   'openpilot/starpilot/car/toyota/tests/test_prius_retrofit_stock.py',
   'openpilot/starpilot/car/toyota/tests/test_prius_retrofit_stock_callers.py',
@@ -59,8 +72,7 @@ AOL_LIFECYCLE_TARGETS = (
   'openpilot/starpilot/aol/tests/test_hkg_native_admission.py',
   'openpilot/starpilot/aol/tests/test_native_observation_admission.py',
   'openpilot/starpilot/aol/tests/test_forte_physical_arm_join.py',
-  'opendbc_repo/opendbc/car/ford/tests/test_mache_display_handoff.py',
-  'opendbc_repo/opendbc/safety/tests/test_ford_mache_display.py',
+  'opendbc_repo/opendbc/safety/tests/test_ford_canfd_display.py',
   'openpilot/starpilot/aol/tests/test_hkg_cancel_joined.py',
   'openpilot/starpilot/aol/tests/test_gv70_two_panda_long.py',
   'openpilot/starpilot/longitudinal/tests/test_gv70_stopping_parity.py',
@@ -142,6 +154,12 @@ AOL_LIFECYCLE_TARGETS = (
   "openpilot/starpilot/car/toyota/tests/test_camera_2aa_native.py",
   "openpilot/starpilot/car/toyota/tests/test_prius_sdsu_filter.py",
   "openpilot/starpilot/car/toyota/tests/test_prius_sdsu_callers.py",
+  "openpilot/starpilot/galaxy/tests/test_prius_sng_settings.py",
+  "openpilot/starpilot/car/toyota/tests/test_sng_resume.py",
+  "openpilot/starpilot/car/toyota/tests/test_sng.py",
+  "openpilot/starpilot/car/toyota/tests/test_sng_callers.py",
+  "openpilot/starpilot/car/toyota/tests/test_brake_stop_cancel.py",
+  "openpilot/starpilot/car/toyota/tests/test_prius_stop_engagement_callers.py",
   "opendbc_repo/opendbc/safety/tests/test_toyota_prius_sdsu.py",
   "openpilot/starpilot/car/toyota/tests/test_prius_advert_filter.py",
   "openpilot/starpilot/car/toyota/tests/test_prius_advert_callers.py",
@@ -225,10 +243,6 @@ DEBUG_SAFETY_CLASS_TARGETS = {
   "opendbc_repo/opendbc/safety/tests/test_hyundai_ev9_long.py": (
     "opendbc_repo/opendbc/safety/tests/test_hyundai_ev9_long.py::TestEv9LongDebugContract",
   ),
-  "opendbc_repo/opendbc/safety/tests/test_ford_mach_e_extended.py": (
-    "opendbc_repo/opendbc/safety/tests/test_ford_mach_e_extended.py::TestFordMachEExtended",
-    "opendbc_repo/opendbc/safety/tests/test_ford_mach_e_extended.py::TestFordMachEDebugLongExtended",
-  ),
   "opendbc_repo/opendbc/safety/tests/test_hyundai_main_rearm.py": (
     "opendbc_repo/opendbc/safety/tests/test_hyundai_main_rearm.py::TestHkgMainDebug",
   ),
@@ -240,9 +254,7 @@ DEBUG_SAFETY_CLASS_TARGETS = {
 
 
 RELEASE_TARGETS = (
-  'openpilot/starpilot/tests/test_ford_bluepilot_aol.py',
-  'opendbc_repo/opendbc/bluepilot_lateral/tests/test_angle_core.py',
-  'opendbc_repo/opendbc/safety/tests/test_ford_bluepilot_aol.py',
+  "opendbc_repo/opendbc/safety/tests/test_hyundai_gv60_hda1_long_aol.py",
   'openpilot/starpilot/car/toyota/tests/test_prius_retrofit_stock.py',
   'openpilot/starpilot/car/toyota/tests/test_prius_retrofit_stock_callers.py',
   'opendbc_repo/opendbc/car/toyota/tests/test_matrix_filter.py',
@@ -267,8 +279,7 @@ RELEASE_TARGETS = (
   'opendbc_repo/opendbc/safety/tests/test_toyota_radar_lta_pedal.py',
   'opendbc_repo/opendbc/safety/tests/test_toyota_prius_retrofit_advert.py',
   'opendbc_repo/opendbc/car/hyundai/tests/test_long_cp_copy.py',
-  'opendbc_repo/opendbc/car/ford/tests/test_mache_display_handoff.py',
-  'opendbc_repo/opendbc/safety/tests/test_ford_mache_display.py',
+  'opendbc_repo/opendbc/safety/tests/test_ford_canfd_display.py',
   "opendbc_repo/opendbc/safety/tests/test_toyota_prius_advert.py",
   'opendbc_repo/opendbc/safety/tests/test_hyundai_gv60_long.py::TestGV60LongReleaseDenied',
   'openpilot/starpilot/tests/test_ford_configuration_parity.py',
@@ -390,15 +401,9 @@ RELEASE_TARGETS = (
   "opendbc_repo/opendbc/car/ford/tests/test_aol_startup.py",
   "openpilot/starpilot/tests/test_ford_aol_intent.py",
   "opendbc_repo/opendbc/safety/tests/test_ford_aol.py",
-  "opendbc_repo/opendbc/safety/tests/test_ford_mach_e_extended.py::TestFordMachEExtended",
-  "opendbc_repo/opendbc/safety/tests/test_ford_mach_e_extended.py::TestFordMachELongReleaseExtended",
+  "opendbc_repo/opendbc/safety/tests/test_ford.py::TestFordCANFDLongitudinalSafety",
   "opendbc_repo/opendbc/car/ford/tests/test_added_firmware_identity.py",
   "opendbc_repo/opendbc/car/ford/tests/test_required_source_health.py",
-  "opendbc_repo/opendbc/car/ford/tests/test_blend_settings.py",
-  "opendbc_repo/opendbc/car/ford/tests/test_blend_settings_startup.py",
-  "opendbc_repo/opendbc/car/ford/tests/test_production_extensions.py",
-  "opendbc_repo/opendbc/car/ford/tests/test_generic_canfd.py",
-  "opendbc_repo/opendbc/safety/tests/test_ford_generic_canfd_extended.py",
   "opendbc_repo/opendbc/car/hyundai/tests/test_blended_stock_aol.py",
   "openpilot/starpilot/aol/tests/test_nexo_stock_aol.py",
   "opendbc_repo/opendbc/safety/tests/test_nexo_stock_aol.py",
@@ -566,7 +571,7 @@ def sha256(path):
 
 def targets_for(suite):
   if suite == "aol-lifecycle":
-    return list(AOL_LIFECYCLE_TARGETS)
+    return list(AOL_LIFECYCLE_TARGETS + FORD_BLUEPILOT_TARGETS)
   if suite == "interfaces":
     car_root = ROOT / "opendbc_repo/opendbc/car"
     return [str(path.relative_to(ROOT)) for path in sorted(car_root.rglob("test_*.py"))
@@ -575,9 +580,9 @@ def targets_for(suite):
     paths = [str(path.relative_to(ROOT)) for path in sorted((ROOT / "opendbc_repo/opendbc/safety/tests").glob("test_*.py"))]
     return [selected for path in paths for selected in DEBUG_SAFETY_CLASS_TARGETS.get(path, (path,))] + [
       "openpilot/starpilot/aol/tests/test_classic_startup_neutral_replacement.py",
-    ]
+    ] + list(FORD_BLUEPILOT_NATIVE_TARGETS)
   if suite == "safety-release":
-    return list(RELEASE_TARGETS)
+    return list(RELEASE_TARGETS + FORD_BLUEPILOT_TARGETS + FORD_BLUEPILOT_NATIVE_TARGETS)
   raise ValueError(f"Unknown vehicle test suite: {suite}")
 
 
@@ -688,6 +693,9 @@ def native_provenance():
 def build_safety_library(release, output):
   from opendbc.car.structs import CarParams
   from opendbc.safety.tests.libsafety import libsafety_py
+  alias = "opendbc_repo.opendbc.safety.tests.libsafety.libsafety_py"
+  if sys.modules.setdefault(alias, libsafety_py) is not libsafety_py:
+    raise RuntimeError("Vehicle tests imported multiple native safety loaders")
   commands = []
   check_call = subprocess.check_call
 

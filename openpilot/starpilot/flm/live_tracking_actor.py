@@ -560,11 +560,30 @@ class LiveTrackingActor:
       # Fork freezes the genuine source prefix without copying its nested
       # checkpoint graph on the ingestion loop. The original worker still
       # recomputes the complete controller/native evidence independently.
-      from openpilot.starpilot.flm.live_tracking_probe_process import original_probe_context, prepare_probe_wire
+      from openpilot.starpilot.flm.live_tracking_probe_process import original_probe_context, prepare_probe_payloads
 
       expected = original_probe_context(selected, accepted, self.certificate.binding, source, group=group, names=names, now_ns=now_ns)
 
       def prepare_probe():
+        import json
+        import os
+        import resource
+        import time
+
+        os.nice(10)
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
+        limit = min([20] + [value for value in (soft, hard) if value >= 0])
+        resource.setrlimit(resource.RLIMIT_CPU, (limit, hard))
+        memory_soft, memory_hard = resource.getrlimit(resource.RLIMIT_AS)
+        memory_limit = min([2 * 1024 * 1024 * 1024] + [value for value in (memory_soft, memory_hard) if value >= 0])
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_hard))
+        from openpilot.starpilot.flm.learner_cpu import configure_cpu
+        configure_cpu(numerical=True)
+        from openpilot.starpilot.flm.native_primitives import enable_fit_worker
+        enable_fit_worker()
+        from openpilot.starpilot.flm.live_tracking_probe_worker import evaluate_job, MAX_OUTPUT
+
         jobs = []
         for endpoint, emission, original_prefix in selected:
           snapshot = probe_replay_snapshot(collector.adapter.replay, original_prefix, endpoint_output=emission)
@@ -583,26 +602,13 @@ class LiveTrackingActor:
               group=group,
               names=names,
               prefix_controls=original_prefix,
+              _payload_only=True,
             )
           )
         # This existing child already owns a frozen original source snapshot.
         # Reconstruct/validate the same numerical job HERE instead of paying a
         # second Python startup and streaming it through another pipe.
-        import json
-        import os
-        import resource
-        import time
-
-        os.nice(10)
-        from openpilot.starpilot.flm.live_tracking_probe_worker import evaluate_job, MAX_OUTPUT
-
-        soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
-        limit = min([20] + [value for value in (soft, hard) if value >= 0])
-        resource.setrlimit(resource.RLIMIT_CPU, (limit, hard))
-        memory_soft, memory_hard = resource.getrlimit(resource.RLIMIT_AS)
-        memory_limit = min([2 * 1024 * 1024 * 1024] + [value for value in (memory_soft, memory_hard) if value >= 0])
-        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_hard))
-        prepared = prepare_probe_wire(jobs, queued_ns=now_ns, expected=expected)
+        prepared = prepare_probe_payloads(tuple(jobs), queued_ns=now_ns, expected=expected)
         started_ns = time.monotonic_ns()
         if not now_ns <= started_ns <= now_ns + 2_000_000_000:
           raise ValueError('original numerical input deadline expired')
@@ -740,6 +746,14 @@ class LiveTrackingActor:
       self._advance_original_decoder(collector, now_ns)
       self._retire_identified_history(collector)
     if collector is None or source is None or not collector.ready or current_native is not True:
+      # Report the current missing input, not an earlier identity transition.
+      # Retaining historical work below still supplies no current permission.
+      self.reason = (
+        'controller_collection_required' if collector is None else
+        'current_settings_source_required' if source is None else
+        'qualified_control_output_pair_required' if not collector.ready else
+        'current_native_permission_unavailable'
+      )
       # A frozen response job describes ORIGINAL source/native observations,
       # not permission to apply a correction now. Temporary input/native gaps
       # must not cancel that computation after expensive snapshot preparation.

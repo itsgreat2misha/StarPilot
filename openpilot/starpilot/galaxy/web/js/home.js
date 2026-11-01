@@ -1,3 +1,4 @@
+import { displayLocale } from "./localization.js"
 import { GxState } from "./state.js"
 import { GxNotice } from "./notice.js"
 import { LocalAccess } from "./local-access.js"
@@ -5,6 +6,7 @@ import { MonitorFeed } from "./monitor-feed.js"
 import { SoftwareStatusFeed } from "./software-status.js"
 import { ModelStatusFeed } from "./models.js"
 import { DriveStatsFeed } from "./drive-stats.js"
+import { WeatherVitals } from "./weather.js"
 
 // The six lightweight motifs follow the original Galaxy Personal Records row.
 const RECORD_ART = {
@@ -34,13 +36,13 @@ const driveDate = (start, end = null) => {
   if (start === null) return "Date unavailable"
   const date = new Date(start * 1000)
   if (!Number.isFinite(date.getTime())) return "Date unavailable"
-  const calendar = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
-  const clock = (value) => new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(value * 1000))
+  const calendar = new Intl.DateTimeFormat(displayLocale(), { month: "short", day: "numeric", year: "numeric" })
+  const clock = (value) => new Intl.DateTimeFormat(displayLocale(), { hour: "2-digit", minute: "2-digit" }).format(new Date(value * 1000))
   const day = calendar.format(date)
   const endDay = end !== null ? calendar.format(new Date(end * 1000)) : null
   return `${day} · ${clock(start)}${end !== null ? `–${endDay === day ? "" : endDay + " · "}${clock(end)}` : ""}`
 }
-const dayLabel = (date) => new Intl.DateTimeFormat(undefined, { timeZone: "UTC", weekday: "short" }).format(new Date(`${date}T00:00:00Z`))
+const dayLabel = (date) => new Intl.DateTimeFormat(displayLocale(), { timeZone: "UTC", weekday: "short" }).format(new Date(`${date}T00:00:00Z`))
 const recordDisplay = (record, isMetric) => record.value === null ? "Unavailable" :
   record.unit === "m" ? distance(record.value, isMetric) : record.unit === "s" ? duration(record.value) :
     record.unit === "days" || record.unit === "drives" ? counted(record.value, record.unit.slice(0, -1)) :
@@ -51,11 +53,7 @@ export function driveSummary(feed) {
   if (!data) return null
   const isMetric = data.isMetric
   const last = data.lastDrive
-  const analysisStatus = (drive) => {
-    const failure = data.analysis.failures?.find((item) => item.routeId === drive.routeId)
-    return { analysisLabel: failure?.retryStopped ? "Analysis paused" : failure ? "Retry scheduled" : "Analysis pending",
-      analysisError: failure?.reason || drive.reason || "" }
-  }
+  const analysisStatus = () => ({ analysisLabel: "Incomplete recording" })
   const maximum = Math.max(1, ...data.week.days.map((day) => day.distanceMeters ?? 0))
   const models = data.models.slice(0, 3)
   const modelTotal = models.reduce((sum, model) => sum + (model.distanceMeters ?? 0), 0)
@@ -103,9 +101,10 @@ export function homeSummary(monitor, model, software) {
       available: !!live,
       cpu: measure(live?.cpuPercent, "%"),
       memory: measure(live?.memory?.percent, "%"),
+      battery: measure(live?.batteryVoltage, " V", 1),
       storage: live?.storage?.usedGiB != null && live?.storage?.totalGiB != null
         ? `${measure(live.storage.usedGiB, " GiB", 1)} / ${measure(live.storage.totalGiB, " GiB", 1)}` : "Unavailable",
-      observed: live ? new Date(live.sampledAt * 1000).toLocaleString() : "Unavailable",
+      observed: live ? new Date(live.sampledAt * 1000).toLocaleString(displayLocale()) : "Unavailable",
     },
     model: {
       available: !!loaded,
@@ -126,7 +125,7 @@ export function homeSummary(monitor, model, software) {
 
 export const Home = {
   name: "Home",
-  components: { GxState, GxNotice, LocalAccess },
+  components: { GxState, GxNotice, LocalAccess, WeatherVitals },
   props: { mode: { type: String, required: true }, unauthorized: { type: Function, required: true },
     go: { type: Function, required: true } },
   data: () => ({
@@ -189,7 +188,7 @@ export const Home = {
           <p v-else-if="!driving.last">No saved drives yet.</p>
           <template v-else>
             <p class="gx-home__date">{{ driving.last.date }}</p>
-            <p v-if="!driving.last.complete" class="gx-home__subtle">{{ driving.last.analysisLabel }}{{ driving.last.analysisError ? ": " + driving.last.analysisError : "" }}</p>
+            <p v-if="!driving.last.complete" class="gx-home__subtle">{{ driving.last.analysisLabel }}</p>
             <div class="gx-home__four"><div><strong>{{ driving.last.distance }}</strong><span>distance</span></div>
               <div><strong>{{ driving.last.duration }}</strong><span>duration</span></div>
               <div><strong>{{ driving.last.engaged }}</strong><span>engaged</span></div>
@@ -224,15 +223,12 @@ export const Home = {
               <div v-for="record in driving.records" :key="record.id" class="gx-home__record"><span class="gx-home__record-art" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path v-for="(path, index) in recordArt(record.id)" :key="index" :d="path" /></svg></span><span class="gx-home__record-label">{{ record.label }}</span><strong>{{ record.display }}</strong></div>
             </section>
           </div>
-          <GxNotice tone="danger" v-if="driving.analysis.failed">{{ driving.analysis.failed }} drive analysis failure{{ driving.analysis.failed === 1 ? '' : 's' }}{{ driving.analysis.quarantined ? ' · automatic retries paused for ' + driving.analysis.quarantined : '' }}.
-            <div v-for="failure in driving.analysis.failures" :key="failure.routeId">{{ failure.routeId }}: {{ failure.reason }}</div>
-          </GxNotice>
           <section class="gx-card gx-home__recent"><div class="gx-section__header"><i class="bi bi-clock-history"></i><h2 class="gx-section__title">Recent Drives</h2></div>
             <p v-if="!driving.recent.length" class="gx-home__subtle">No saved drives yet.</p>
             <div v-for="drive in driving.recent" :key="drive.routeId" class="gx-home__drive" :class="{ 'is-ignored': drive.ignored }">
               <div><strong>{{ drive.date }}</strong><small>{{ drive.model }}</small></div>
               <div><strong>{{ drive.complete ? drive.distance : drive.analysisLabel }}</strong><small>{{ drive.duration }} · {{ drive.engaged }} engaged</small><small>{{ drive.aol }} AOL steering only</small></div>
-              <div><small>{{ drive.ignored ? 'Excluded from totals' : drive.complete ? 'Included in totals' : drive.analysisError || drive.analysisLabel }}</small>
+              <div><small>{{ drive.ignored ? 'Excluded from totals' : drive.complete ? 'Included in totals' : drive.analysisLabel }}</small>
                 <button type="button" class="gx-home__link" :inert="drives.busy" :aria-busy="drives.busy || undefined" @click="ignoreDrive(drive)">
                   {{ drive.ignored ? 'Include in stats' : 'Ignore drive stats' }}</button></div>
             </div>
@@ -243,7 +239,7 @@ export const Home = {
             <div v-else class="gx-home__model-layout"><div class="gx-home__model-donut" :style="driving.modelStyle"></div>
               <div><div v-for="model in driving.models" :key="model.name" class="gx-home__model-row">
                 <span class="gx-home__swatch" :style="{ background: model.color }"></span>
-                <div><strong>{{ model.name }}</strong><small>{{ counted(model.drives, "drive") }} · {{ model.distance }}</small></div></div></div></div>
+                <div><strong><span translate="no">{{ model.name }}</span></strong><small>{{ counted(model.drives, "drive") }} · {{ model.distance }}</small></div></div></div></div>
           </section>
         </template>
         <div class="gx-home__section-title"><span></span>Your device</div>
@@ -254,7 +250,9 @@ export const Home = {
             <p v-if="!summary.system.available" role="status">Live system status unavailable.</p>
             <template v-else><div class="gx-home__metrics"><div><strong>{{ summary.system.cpu }}</strong><span>CPU</span></div>
               <div><strong>{{ summary.system.memory }}</strong><span>Memory</span></div></div>
+              <p>12 V battery: <strong>{{ summary.system.battery }}</strong></p>
               <p>Storage: {{ summary.system.storage }}</p><small>Sampled {{ summary.system.observed }}</small></template>
+            <WeatherVitals :metric="drives.data?.isMetric === true" :mode="mode" :unauthorized="unauthorized" />
             <button type="button" class="gx-home__link" @click="go('/logs/monitor')">Open System Monitor <i class="bi bi-arrow-right"></i></button>
           </section>
           <section class="gx-card gx-home__card">

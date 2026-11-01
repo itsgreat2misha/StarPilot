@@ -59,8 +59,12 @@ def test_initializing_gm_output_is_inactive_and_profile_complete(cp):
   sent = []
   last_ns = 0
   last_counter = 0
+  steering_receipts = []
   for tick in range(600):
     now = 12_380_000_000 + tick * 10_000_000
+    if controller.bolt_steering_ack_counter:
+      controller.observe_steering_receipts([(now - 5_000_000, steering_receipts)])
+    steering_receipts = []
     cs.loopback_lka_steering_cmd_updated = bool(last_ns)
     cs.loopback_lka_steering_cmd_ts_nanos = last_ns
     cs.loopback_lka_steering_cmd_counter = last_counter
@@ -74,6 +78,7 @@ def test_initializing_gm_output_is_inactive_and_profile_complete(cp):
         last_ns = now
         last_counter = (data[0] >> 4) & 3
         sent.append(now)
+        steering_receipts.append((address, bytes(data), 128))
       else:
         assert controller.startup_acc_keepalive
         brake_bus = (2 if controller.ordinary_sdgm_long or controller.volt_sdgm_long or
