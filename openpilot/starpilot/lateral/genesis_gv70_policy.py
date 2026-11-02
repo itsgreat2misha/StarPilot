@@ -47,8 +47,8 @@ from openpilot.starpilot.lateral.gv70_shaping import (
 
 
 # --- Ioniq 6 borrowables, GV70-adapted (gv70-experimental only) ---
-# SINGLE CONSTANTS TABLE for Ioniq 6 borrowables (item 1 in this commit;
-# items 2-3 are added as separate commits below, keeping this table in one place). Do not scatter GV70 borrow
+# SINGLE CONSTANTS TABLE for Ioniq 6 borrowables (items 1-2 in this commit;
+# item 3 is added as a separate commit below, keeping this table in one place). Do not scatter GV70 borrow
 # constants elsewhere in this file: a later upstream refactor is
 # mechanical if this table stays in one place (see PR note below).
 # Sign convention VERIFIED from Nov 1 route 0000000d--5fe43b8ff6 logs:
@@ -69,6 +69,23 @@ GV70_CRAWL_TURN_IN_FF_SPEED = 5.3
 GV70_CRAWL_TURN_IN_FF_SPEED_WIDTH = 1.0
 GV70_CRAWL_TURN_IN_FF_LAT = 0.06
 GV70_CRAWL_TURN_IN_FF_LAT_WIDTH = 0.035
+# Item 2: turn-in friction threshold reduction + friction boost
+# (Ioniq get_ioniq_6_friction_threshold / get_ioniq_6_friction_scale,
+# turn-in part only; unwind parts NOT borrowed). GV70 has no
+# phase-dependent friction change, so this is a separate block here,
+# not an edit to shared torque_shaping.py or gv70_shaping.py.
+# Clamps are Ioniq's overall clamps (threshold 0.82-1.18, friction 0.82-1.08);
+# GV70 friction base is 1.0 (not Ioniq's 0.928 base multiplier) -- that
+# base difference is the one deliberate deviation in item 2b, and the
+# PR generalization must take the base as a per-car parameter.
+GV70_TURN_IN_THRESHOLD_REDUCTION_LEFT = 1.42  # Ioniq ..._RIGHT
+GV70_TURN_IN_THRESHOLD_REDUCTION_RIGHT = 0.78  # Ioniq ..._LEFT
+GV70_TURN_IN_FRICTION_BOOST_LEFT = 0.94  # Ioniq ..._RIGHT
+GV70_TURN_IN_FRICTION_BOOST_RIGHT = 0.44  # Ioniq ..._LEFT
+GV70_TURN_IN_FRICTION_LAT_RISE = 0.20
+GV70_TURN_IN_FRICTION_JERK_RISE = 0.24
+GV70_TURN_IN_TRANSITION_SPEED = 10.0
+GV70_TURN_IN_PHASE_SCALE = 0.10
 
 
 # PR NOTE (applies to every helper below): each helper is an
@@ -83,6 +100,23 @@ def _gv70_side_value(desired_lateral_accel: float, left_value: float, right_valu
   # Ioniq returns left_value for desLat >= 0; GV70 left turns have
   # desLat < 0 in the Nov 1 logs, so GV70 returns left_value for < 0.
   return left_value if desired_lateral_accel < 0.0 else right_value
+
+
+def _gv70_transition_phase(desired_lateral_accel: float, desired_lateral_jerk: float) -> float:
+  # Experimental GV70 copy of _ioniq_6_transition_phase (identical formula).
+  # PR version should generalize _ioniq_6_transition_phase to a shared
+  # helper with per-car parameters rather than duplicating it.
+  return math.tanh((desired_lateral_accel * desired_lateral_jerk) / GV70_TURN_IN_PHASE_SCALE)
+
+
+def _gv70_transition_envelope(v_ego: float, desired_lateral_accel: float, desired_lateral_jerk: float) -> float:
+  # Experimental GV70 copy of _ioniq_6_transition_envelope (identical formula).
+  # PR version should generalize _ioniq_6_transition_envelope to a shared
+  # helper with per-car parameters rather than duplicating it.
+  low_speed_factor = 1.0 / (1.0 + (max(v_ego, 0.0) / GV70_TURN_IN_TRANSITION_SPEED) ** 2)
+  lat_factor = 1.0 - math.exp(-abs(desired_lateral_accel) / GV70_TURN_IN_FRICTION_LAT_RISE)
+  jerk_factor = 1.0 - math.exp(-abs(desired_lateral_jerk) / GV70_TURN_IN_FRICTION_JERK_RISE)
+  return low_speed_factor * lat_factor * jerk_factor
 
 
 def get_gv70_crawl_turn_in_ff_scale(desired_lateral_accel: float, desired_lateral_jerk: float, v_ego: float) -> float:
@@ -109,6 +143,44 @@ def get_gv70_crawl_turn_in_ff_scale(desired_lateral_accel: float, desired_latera
   ) * crawl_speed_weight * crawl_lat_weight
   return 1.0 + crawl_turn_in_scale
 
+
+def get_gv70_turn_in_threshold_scale(v_ego: float, desired_lateral_accel: float = 0.0, desired_lateral_jerk: float = 0.0) -> float:
+  """Experimental GV70 copy of the turn-in part of get_ioniq_6_friction_threshold.
+
+  Signature mirrors get_ioniq_6_friction_threshold (v, desLat, jerk).
+  Returns a SCALE only (GV70's own threshold from gv70_shaping.py is
+  multiplied by it at the call site) because the GV70 base threshold
+  differs from Ioniq's; the unwind-increase part of the Ioniq helper
+  is NOT borrowed. PR version should generalize
+  get_ioniq_6_friction_threshold to a shared helper with per-car
+  parameters rather than duplicating it. Constants are Ioniq 6 values
+  pending GV70 validation, sign-transferred per the table above.
+  """
+  turn_in_weight = max(_gv70_transition_phase(desired_lateral_accel, desired_lateral_jerk), 0.0)
+  threshold_scale = 1.0 - (_gv70_side_value(
+    desired_lateral_accel,
+    GV70_TURN_IN_THRESHOLD_REDUCTION_LEFT,
+    GV70_TURN_IN_THRESHOLD_REDUCTION_RIGHT,
+  ) * _gv70_transition_envelope(v_ego, desired_lateral_accel, desired_lateral_jerk) * turn_in_weight)
+  return min(max(threshold_scale, 0.82), 1.18)
+
+
+def get_gv70_turn_in_friction_scale(v_ego: float, desired_lateral_accel: float, desired_lateral_jerk: float) -> float:
+  """Experimental GV70 copy of the turn-in part of get_ioniq_6_friction_scale.
+
+  Signature mirrors get_ioniq_6_friction_scale (v, desLat, jerk).
+  GV70 base is 1.0, not Ioniq's 0.928, and the unwind-reduction part
+  of the Ioniq helper is NOT borrowed. PR version should generalize
+  get_ioniq_6_friction_scale to a shared helper with per-car
+  parameters (including the base) rather than duplicating it.
+  Constants are Ioniq 6 values pending GV70 validation,
+  sign-transferred per the table above.
+  """
+  turn_in_weight = max(_gv70_transition_phase(desired_lateral_accel, desired_lateral_jerk), 0.0)
+  friction_scale = 1.0
+  friction_scale += (_gv70_side_value(desired_lateral_accel, GV70_TURN_IN_FRICTION_BOOST_LEFT, GV70_TURN_IN_FRICTION_BOOST_RIGHT) *
+                     _gv70_transition_envelope(v_ego, desired_lateral_accel, desired_lateral_jerk) * turn_in_weight)
+  return min(max(friction_scale, 0.82), 1.08)
 
 def supported_cp(CP):
   return (
@@ -205,12 +277,24 @@ class GenesisGV70TorquePolicy:
     # with per-car parameters rather than duplicating it.
     ff *= get_gv70_crawl_turn_in_ff_scale(setpoint, desired_lateral_jerk, CS.vEgo)
     friction_threshold = get_genesis_gv70_friction_threshold(CS.vEgo, setpoint, desired_lateral_jerk)
+    # Item 2a: experimental GV70 copy of the turn-in part of
+    # get_ioniq_6_friction_threshold (separate block; GV70's own threshold
+    # from gv70_shaping.py is left untouched). PR version should generalize
+    # get_ioniq_6_friction_threshold to a shared helper with per-car
+    # parameters rather than duplicating it.
+    friction_threshold *= get_gv70_turn_in_threshold_scale(CS.vEgo, setpoint, desired_lateral_jerk)
     vehicle_deadzone = get_genesis_gv70_friction_jerk_deadzone(CS.vEgo, setpoint)
     friction_jerk_deadzone = center_chatter_friction_jerk_deadzone(CS.vEgo, setpoint, vehicle_deadzone)
     friction_jerk = math.copysign(max(abs(desired_lateral_jerk) - friction_jerk_deadzone, 0.0), desired_lateral_jerk)
     ff, friction_threshold = auto_stages.apply_stages(parent, CS, setpoint, desired_lateral_jerk, ff, friction_threshold,
       active=active, limited=steer_limited_by_safety or curvature_limited, curvature_limited=curvature_limited)
     selected_friction = parent.friction(error_with_lsf + JERK_GAIN * friction_jerk, lateral_accel_deadzone, friction_threshold, CS, setpoint)
+    # Item 2b: experimental GV70 copy of the turn-in part of
+    # get_ioniq_6_friction_scale (separate block; base is 1.0 for GV70,
+    # not Ioniq's 0.928). PR version should generalize
+    # get_ioniq_6_friction_scale to a shared helper with per-car
+    # parameters rather than duplicating it.
+    selected_friction = float(selected_friction) * get_gv70_turn_in_friction_scale(CS.vEgo, setpoint, desired_lateral_jerk)
     ff += auto_stages.apply_selected_friction(parent, CS, setpoint, float(selected_friction),
       active=active, limited=steer_limited_by_safety or curvature_limited, curvature_limited=curvature_limited)
     if CS.vEgo < self.low_speed_reset_threshold:
