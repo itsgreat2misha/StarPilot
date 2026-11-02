@@ -86,7 +86,7 @@ static bool toyota_hold_gas_seen = false;
 static bool toyota_rx_ready(uint32_t now) {
   bool rx_valid = true;
   for (int i = 0; i < current_safety_config.rx_checks_len; i++) {
-    const RxStatus *status = &current_safety_config.rx_checks[i].status;
+    const RxStatus *status = &rx_status[i];
     rx_valid &= status->msg_seen && status->valid_checksum && status->valid_quality_flag &&
                 (status->wrong_counters < MAX_WRONG_COUNTERS) && !status->lagging &&
                 (safety_get_ts_elapsed(now, status->last_timestamp) <= 1000000U);
@@ -100,7 +100,7 @@ static bool toyota_legacy_main_current(void) {
     ready = false;
     if ((current_safety_config.rx_checks_len == 6) ||
         (toyota_pedal_composite && (current_safety_config.rx_checks_len > 6))) {
-      const RxStatus *main_status = &current_safety_config.rx_checks[5].status;
+      const RxStatus *main_status = &rx_status[5];
       ready = main_status->msg_seen && main_status->valid_checksum && main_status->valid_quality_flag &&
         !main_status->lagging && (main_status->wrong_counters < MAX_WRONG_COUNTERS) && acc_main_on &&
         (safety_get_ts_elapsed(microsecond_timer_get(), main_status->last_timestamp) <= 303031U);
@@ -729,7 +729,7 @@ static safety_config toyota_init(uint16_t param) {
   }
 
   if (toyota_secoc) {
-    static RxCheck toyota_secoc_rx_checks[] = {
+    static const RxCheck toyota_secoc_rx_checks[] = {
       TOYOTA_SECOC_RX_CHECKS
     };
 

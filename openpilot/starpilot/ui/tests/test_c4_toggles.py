@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock, call, patch
 
-import pyray as rl
+from openpilot.starpilot.ui.raylib import rl
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.layouts.settings import common
@@ -99,6 +99,13 @@ class TestC4Toggles(unittest.TestCase):
     self.panel._on_rhd(True)
     self.assertFalse(self.params.get_bool('IsRhdDetected'))
     self.assertFalse(self.params.get_bool('OnroadCycleRequested'))
+
+  def test_fleet_lock_disables_only_always_on_dm(self):
+    self.params.put_bool("AlwaysOnDMLock", True, block=True)
+    panel = toggles.TogglesLayoutMici()
+    dm = next(item for key, item in panel._refresh_toggles if key == "AlwaysOnDM")
+    self.assertFalse(dm.enabled)
+    self.assertTrue(self.audio.enabled)
 
   def test_release_queues_audio_before_restart_without_blocking_writes(self):
     with patch.object(self.params, "put_bool") as save:

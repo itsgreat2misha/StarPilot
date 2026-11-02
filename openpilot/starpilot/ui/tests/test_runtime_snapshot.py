@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-import pyray as rl
+from openpilot.starpilot.ui.raylib import rl
 import pytest
 
 from openpilot.cereal import log, messaging
@@ -101,6 +101,52 @@ def ui_fake():
 
 
 class TestRuntimeSnapshot(unittest.TestCase):
+
+  def test_home_uses_shared_statistics_source_without_onroad_polling(self):
+    from openpilot.starpilot.ui.home_state import DriveStatsData, DriveSummary
+    data = DriveStatsData(DriveSummary(3, 10., 1.), DriveSummary(), DriveSummary(), (), ())
+    source = Mock(return_value=data)
+    ui = ui_fake()
+    adapter = RuntimeSnapshotAdapter(ui, home_stats=source)
+    self.assertIs(adapter.build(ShellMode.HOME, now_ns=NOW).home.stats, data)
+    source.assert_called_once_with(False)
+    source.reset_mock()
+    adapter.build(ShellMode.ONROAD, now_ns=NOW + 1)
+    adapter.build(ShellMode.SETTINGS, now_ns=NOW + 2)
+    source.assert_not_called()
+    ui.is_metric = True
+    adapter.build(ShellMode.HOME, now_ns=NOW + 3)
+    source.assert_called_once_with(True)
+
+
+  def test_onroad_saved_display_flags_share_the_settings_refresh(self):
+    ui = ui_fake()
+    ui.params.values.update(NavigationEnabled="1", ShowCSCStatus="1")
+    original = ui.params.get_bool
+    reads = []
+    def get_bool(key):
+      if key in ("NavigationEnabled", "ShowCSCStatus"):
+        reads.append(key)
+      return original(key)
+    ui.params.get_bool = get_bool
+    adapter = RuntimeSnapshotAdapter(ui)
+    self.assertTrue(adapter.build(ShellMode.ONROAD, now_ns=NOW).onroad.show_curve_status)
+    self.assertEqual(reads, ["NavigationEnabled", "ShowCSCStatus"])
+    ui.params.values.update(NavigationEnabled="0", ShowCSCStatus="0")
+    for tick in range(1, 60):
+      ui.sm.frame += 1
+      self.assertTrue(adapter.build(ShellMode.ONROAD, now_ns=NOW + tick * 16_000_000).onroad.show_curve_status)
+    self.assertEqual(reads, ["NavigationEnabled", "ShowCSCStatus"])
+    self.assertFalse(adapter.build(ShellMode.ONROAD, now_ns=NOW + 1_000_000_000).onroad.show_curve_status)
+    self.assertEqual(reads, ["NavigationEnabled", "ShowCSCStatus"] * 2)
+    ui.params.values.update(NavigationEnabled="1", ShowCSCStatus="1")
+    self.assertTrue(adapter.build(ShellMode.ONROAD, now_ns=NOW - 1).onroad.show_curve_status)
+    self.assertEqual(reads, ["NavigationEnabled", "ShowCSCStatus"] * 3)
+    ui.params.values.update(NavigationEnabled="0", ShowCSCStatus="0")
+    adapter.invalidate_appearance()
+    self.assertFalse(adapter.build(ShellMode.ONROAD, now_ns=NOW).onroad.show_curve_status)
+    self.assertEqual(reads, ["NavigationEnabled", "ShowCSCStatus"] * 4)
+
   def test_switchback_display_uses_payload_reader_with_original_source_metadata(self):
     from opendbc.car.structs import CarParams
     ui = ui_fake()
@@ -342,6 +388,14 @@ class TestRuntimeSnapshot(unittest.TestCase):
     self.assertEqual(adapter.build(ShellMode.SETTINGS, 'unknown').selected, Destination.STAR)
     self.assertEqual(adapter.build(ShellMode.HOME, Destination.BLUETOOTH).selected, Destination.STAR)
 
+  def test_fleet_dm_lock_is_visible_in_toggle_snapshot(self):
+    from openpilot.starpilot.ui.toggles_state import ToggleKey
+    ui = ui_fake()
+    original = ui.params.get_bool
+    ui.params.get_bool = lambda key: key == "AlwaysOnDMLock" or original(key)
+    snapshot = RuntimeSnapshotAdapter(ui).build(ShellMode.SETTINGS, Destination.TOGGLES)
+    self.assertIn(ToggleKey.ALWAYS_ON_DM, snapshot.toggles.unavailable)
+
   def test_home_keeps_live_fields_without_querying_leaf_panels(self):
     ui = ui_fake()
     ui.started = False
@@ -446,7 +500,7 @@ class TestRuntimeSnapshot(unittest.TestCase):
     reads.clear()
     ui.params.values['UpdaterState'] = 'downloading'
     same_second = adapter.build(ShellMode.ONROAD, now_ns=NOW + 10_000_000)
-    self.assertEqual(len(reads), 3)
+    self.assertEqual(reads, ['LongitudinalPersonality'])
     self.assertEqual(same_second.software, first.software)
     refreshed = adapter.build(ShellMode.ONROAD, now_ns=NOW + 1_000_000_000)
     self.assertNotEqual(refreshed.software, first.software)
@@ -766,7 +820,7 @@ class TestRuntimeSnapshot(unittest.TestCase):
     self.assertEqual(snapshot.home.model_label, "")
 
   def test_zero_speed_remains_visible_across_signed_filtered_estimates(self):
-    import pyray as rl
+    from openpilot.starpilot.ui.raylib import rl
     from openpilot.starpilot.ui.onroad_large_widgets import CurrentSpeedHud
 
     for metric in (False, True):

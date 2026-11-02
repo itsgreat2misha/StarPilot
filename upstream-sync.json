@@ -22,8 +22,8 @@
     {
       "path": "panda",
       "url": "https://github.com/commaai/panda.git",
-      "commit": "a59195163c32a3a375ea6c86715dc08fd0984c1b",
-      "tree": "207668f2df34a2ca503de012208c394ad01b2c6b",
+      "commit": "f38f504ffac4a6d42bb4c20897adcf5b68093151",
+      "tree": "6d6101f8f3700088062c247a9509f8b5ac8d23c7",
       "exclude": []
     },
     {
@@ -43,8 +43,8 @@
     {
       "path": "tinygrad_repo",
       "url": "https://github.com/tinygrad/tinygrad.git",
-      "commit": "9d0446a4ba8a532c8b674fb6ad795af015cd9dcf",
-      "tree": "03f35edac84fbe516023911c1a135e5a577f5d95",
+      "commit": "ec91b74b5b6b0fc924b72d3f27689679ca2438b9",
+      "tree": "1cb22a40b0aa242b2e432fc7b88f8b85fc391f81",
       "exclude": [
         "AGENTS.md"
       ]

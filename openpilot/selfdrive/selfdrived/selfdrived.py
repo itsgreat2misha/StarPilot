@@ -260,7 +260,7 @@ class SelfdriveD:
       self.events.add(EventName.dashcamMode, static=True)
 
   def update_process_health(self) -> bool:
-    not_running = driving_process_failures(self.sm['managerState'].processes)
+    not_running = driving_process_failures(self.sm['managerState'].processes) - {'ui'}
     if self.sm.recv_frame['managerState'] and not_running:
       if not_running != self.not_running_prev:
         cloudlog.event("process_not_running", not_running=not_running, error=True)
@@ -829,8 +829,10 @@ class SelfdriveD:
   def source_deadline_deferral_supported(self):
     from openpilot.starpilot.car.hyundai.aol import source_deadline_supported
     from openpilot.starpilot.car.toyota.aol import qualified as qualified_toyota
+    from opendbc.car.mazda.stock_aol import qualified as qualified_mazda
     return (qualified_ioniq6(self.CP) or qualified_gm(self.CP) or source_deadline_supported(self.CP) or
-            qualified_toyota(self.CP, marked_only=True) or self.ford_source_deadline_supported())
+            qualified_toyota(self.CP, marked_only=True) or qualified_mazda(self.CP, marked_only=True) or
+            self.ford_source_deadline_supported())
 
   def held_axis_override_wait(self, CS, proof, now_ns, *, fresh_successor=False):
     """Recognize an already applied override; never admit a new physical edge."""
@@ -1311,7 +1313,8 @@ class SelfdriveD:
     previous = self.aol_axis_decision
     was_enabled = self.enabled
     self.aol_axis_decision = AxisDecision()
-    if healthy_expiry and not was_enabled and self.cold_gm_main_readiness(CS, intent, now_ns):
+    if healthy_expiry and not was_enabled and (self.cold_gm_main_readiness(CS, intent, now_ns) or
+        self.cold_gm_main_readiness(CS, intent, now_ns, recovering=True)):
       self.aol_fault_reason = 'availabilityPause'
       self.aol_publication_retained_intent = intent
       return
@@ -1391,6 +1394,10 @@ class SelfdriveD:
         not self.events.contains(ET.IMMEDIATE_DISABLE) and
         (not decision.longitudinal_active or self.enabled and self.active))
     user_disable = self.events.contains(ET.USER_DISABLE)
+    if (user_disable and getattr(self, 'nostalgia_paddle_cancel', False) and fresh_successor and
+        decision.lateral_active and not decision.longitudinal_active and not self.enabled and not self.active and
+        intent.allowedLatch and intent.lateralArmed):
+      user_disable = any(event.userDisable and event.name != EventName.buttonCancel for event in self.events.to_msg())
     if user_disable:
       from opendbc.car.hyundai.canfd_angle_aol import qualified as angle_qualified
       from opendbc.car.hyundai.canfd_stock_aol import qualified as stock_canfd_qualified
@@ -1404,9 +1411,14 @@ class SelfdriveD:
         if stock_lateral_role(self, CS, native, intent, allow_independent_cancel=True,
                               allow_independent_brake=True, allow_independent_gas=True, now_ns=now_ns):
           user_disable = False
+    from opendbc.car.hyundai.blended_stock_aol import qualified as blended_stock_qualified
     if (user_disable and fresh_successor and proof[6] and not proof[7] and proof[8] and not proof[9] and
         decision.desired_lateral and not decision.desired_longitudinal and not decision.longitudinal_active and
-        not self.enabled and not self.active and self.CP.brand == 'toyota' and toyota_qualified(self.CP, marked_only=True) and
+        not self.enabled and not self.active and (
+          self.CP.brand == 'toyota' and toyota_qualified(self.CP, marked_only=True) or
+          self.CP.brand == 'hyundai' and blended_stock_qualified(self.CP, marked_only=True) and
+          not physical_cancel(CS, self.CP) and not any(physical_cancel(sample, self.CP)
+            for sample, _ in getattr(self, 'car_state_samples', ()))) and
         CS.cruiseState.available and not CS.cruiseState.enabled and
         self.CS_prev.cruiseState.available and not self.CS_prev.cruiseState.enabled and
         all(valid and sample.cruiseState.available and not sample.cruiseState.enabled
@@ -1779,17 +1791,17 @@ class SelfdriveD:
     native = _healthy_transport_native(self.sm, self.CP, CS, self.aol_session_id, now_ns)
     return cold_park_readiness(self.CP, CS, native, self.events.to_msg())
 
-  def cold_gm_main_readiness(self, CS, intent, now_ns):
+  def cold_gm_main_readiness(self, CS, intent, now_ns, *, recovering=False):
     from openpilot.starpilot.car.gm.aol import cold_main_readiness
     from openpilot.starpilot.aol.transport_pause import _healthy_transport_native
     if (self.CP.brand != 'gm' or self.enabled or self.active or getattr(self, 'aol_ever_active', False) or self.aol_authority_lost or
-        not self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE) or
+        not recovering and not self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE) or
         intent is None or not intent.settingsQualified or not intent.allowedLatch or not intent.lateralArmed or
         not 0 < intent.carStateLogMonoTime <= intent.observedMonoTime <= now_ns <= intent.validUntilMonoTime or
         now_ns - intent.carStateLogMonoTime > SAFETY_MAX_AGE_NS):
       return False
     native = _healthy_transport_native(self.sm, self.CP, CS, self.aol_session_id, now_ns)
-    return cold_main_readiness(self.CP, CS, native, self.events.to_msg())
+    return cold_main_readiness(self.CP, CS, native, self.events.to_msg(), recovering=recovering)
 
   def ordinary_native_long_withdrawal(self, CS, native, previous, requested, intent, *, source_current, now_ns):
     """Keep the existing ordinary Panda mismatch owner for a LONG-only drop.
@@ -1805,6 +1817,8 @@ class SelfdriveD:
     # publication, live LAT grant and every health/deadline check below still apply.
     ordinary_ford = bool(self.CP.brand == 'ford' and self.CP.openpilotLongitudinalControl and self.CP.safetyConfigs and
       ford_native_accepts_cp(self.CP, int(car.CarParams.SafetyModel.ford), self.CP.safetyConfigs[-1].safetyParam))
+    # Driver steering does not invalidate a still-current native LAT grant.
+    steering_override_allowed = ordinary_ford or self.CP.brand == 'hyundai'
     proof = getattr(self, 'aol_published_input_proof', None)
     prior = getattr(self, 'aol_published_input_native', None)
     anchor = getattr(self, 'aol_ordinary_source_anchor', None)
@@ -1823,10 +1837,10 @@ class SelfdriveD:
         proof[5] != companion.integrity_epoch or not ((intent.allowedLatch and intent.lateralArmed) or ordinary_ford) or
         not native.requestedLateral or not native.lateralAllowed or
         not native.requestedLongitudinal or native.longitudinalAllowed or not native.pandaInventory or
-        CS.brakePressed or CS.regenBraking or CS.gasPressed or CS.steeringPressed and not ordinary_ford or
+        CS.brakePressed or CS.regenBraking or CS.gasPressed or CS.steeringPressed and not steering_override_allowed or
         any(self.events.contains(kind) for kind in (ET.IMMEDIATE_DISABLE, ET.SOFT_DISABLE, ET.USER_DISABLE,
                                                   ET.OVERRIDE_LONGITUDINAL)) or
-        not ordinary_ford and self.events.contains(ET.OVERRIDE_LATERAL)):
+        not steering_override_allowed and self.events.contains(ET.OVERRIDE_LATERAL)):
       return False
     def identity(state):
       return (state.axisSessionId, state.pandaSerial, state.safetyModel, state.safetyParam,
@@ -1944,7 +1958,9 @@ class SelfdriveD:
       native = current_native(self.sm, self.CP, now_ns=now_ns, axis_session_id=self.aol_session_id)
       if native is None and self.initialized:
         lost_active_aol = self.aol_axis_decision.lateral_active or self.aol_axis_decision.longitudinal_active
-        self.events.add(EventName.controlsMismatch)
+        native_missing_at_startup = (not self.sm.seen['aolSafetyWire'] and not self.enabled and
+                                     not self.active and not lost_active_aol)
+        self.events.add(EventName.commIssue if native_missing_at_startup else EventName.controlsMismatch)
     self.aol_decision_native = native
     if self.aol_replay:
       previous_intent = getattr(self, 'aol_last_intent', None)
@@ -2170,11 +2186,11 @@ class SelfdriveD:
       # Lateral-only operation keeps ordinary longitudinal faults visible.
       self.aol_soft_takeover_alert = True
     if (self.aol_replay and intent is not None and intent.lateralArmed and
-        CS.steerFaultTemporary and not CS.steerFaultPermanent and not CS.steeringPressed):
+        CS.steerFaultTemporary and not CS.steerFaultPermanent and (not CS.steeringPressed or self.CP.brand == 'hyundai')):
       # An armed AOL session still needs the ordinary temporary-steering warning
       # while actual steering is suspended and the stock state machine is off.
-      # Like CarSpecificEvents, skip it while the driver is steering: a hard
-      # override alone puts Honda EPS in NO_TORQUE_ALERT_1.
+      # HKG needs the event to retain intent through temporary EPS withdrawal.
+      # Other owners keep CarSpecificEvents' driver-override warning policy.
       if EventName.steerTempUnavailableSilent not in self.events.names:
         self.events.add(EventName.steerTempUnavailableSilent)
       if ET.WARNING not in self.state_machine.current_alert_types:

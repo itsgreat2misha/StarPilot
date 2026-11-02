@@ -620,3 +620,222 @@ def test_gv70_single_panda_long_cancel_neighbor(withdrawal, monkeypatch):
   (CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN, False), (CAR.KIA_EV6, True)])
 def test_default_aol_actual_cancel_join(identity, alternate, monkeypatch):
   _exercise_join(identity, alternate, 'cancel', 'toggle-off', monkeypatch, unmapped=True)
+
+
+@pytest.mark.parametrize('family,alternate', [('ioniq6', False), ('ioniq6', True), ('ioniq5', False)])
+@pytest.mark.parametrize('expired', [False, True])
+def test_nostalgia_paddle_cancel_keeps_fresh_lateral_after_old_proof_expiry(family, alternate, expired):
+  from openpilot.selfdrive.car.tests.test_hyundai_aol import candidate
+  from openpilot.starpilot.aol.tests import test_ioniq_availability as fixture
+  from openpilot.starpilot.tests.test_nostalgia import _ioniq5_params
+
+  with OpenpilotPrefix(), patch.dict(os.environ, {'SIMULATION': '0', 'AOL_REPLAY_RUNTIME': '1'}):
+    Params().put_bool('NostalgiaMode', True, block=True)
+    case = fixture.IoniqAvailabilityTests(methodName='runTest')
+    try:
+      cp = candidate(alternate)[1] if family == 'ioniq6' else _ioniq5_params(alternate=alternate)
+      if family == 'ioniq6':
+        cp.safetyConfigs[-1].safetyParam |= 0x0800
+        sd, _, step, card, receive = case._ioniq_availability_callers(True, cp=cp)
+      else:
+        sd, _, step = case._authority_callers(True, cp=cp, genuine_events=True)
+        for tick in (0, 1):
+          axis, _, command = step(tick)
+          assert axis.lateralActive and axis.longitudinalActive and command.longActive
+      sd.aol_settings = read_settings(Params())
+      prior = sd.aol_published_input_proof
+      observed = fixture.car_state()
+      observed.vEgo = observed.vEgoRaw = .75
+      observed.buttonEvents = [structs.CarState.ButtonEvent(type='altButton2', pressed=True)]
+      tick, offset = (4, 1_516_362) if expired else (2, 0)
+      now = 10_000_000_000 + tick * 10_000_000 + offset
+      assert (now > prior[3]) == expired
+      axis, state, command = step(tick, offset_ns=offset, observed_state=observed, native_request_long=True)
+      assert sd.nostalgia_paddle_cancel
+      assert not state.enabled and not command.longActive and not axis.longitudinalActive
+      assert axis.lateralActive and command.latActive and str(axis.faultReason) == 'none'
+      assert axis.sourceCarStateMonoTime == now and axis.validUntilMonoTime == now + 30_000_000
+      assert 'controlsMismatch' not in [str(event) for event in sd.events.names]
+      if family == 'ioniq6':
+        assert receive(now, state=observed, axis=sd.pm.messages['aolAxisState'], event=sd.pm.messages['onroadEvents'])
+        assert card.aol_card_intent.allowed_latch
+      axis, state, command = step(tick + 1, offset_ns=offset, native_request_long=False, long_allowed=False)
+      assert axis.lateralActive and command.latActive and not command.longActive and not state.enabled
+    finally:
+      case.doCleanups()
+
+
+@pytest.mark.parametrize('fault', ['native_denied', 'native_invalid', 'can_invalid', 'permanent_eps'])
+def test_nostalgia_paddle_expiry_cannot_restore_invalid_lateral(fault):
+  from openpilot.starpilot.aol.tests import test_ioniq_availability as fixture
+
+  with OpenpilotPrefix(), patch.dict(os.environ, {'SIMULATION': '0', 'AOL_REPLAY_RUNTIME': '1'}):
+    Params().put_bool('NostalgiaMode', True, block=True)
+    case = fixture.IoniqAvailabilityTests(methodName='runTest')
+    try:
+      sd, _, step, _, _ = case._ioniq_availability_callers(True)
+      sd.aol_settings = read_settings(Params())
+      observed = fixture.car_state()
+      observed.buttonEvents = [structs.CarState.ButtonEvent(type='altButton2', pressed=True)]
+      kwargs = {}
+      if fault == 'native_denied':
+        kwargs['allowed'] = False
+      elif fault == 'native_invalid':
+        kwargs['native_valid'] = False
+      elif fault == 'can_invalid':
+        observed.canValid = False
+      else:
+        observed.steerFaultPermanent = True
+      axis, _, command = step(5, observed_state=observed, **kwargs)
+      assert not axis.lateralActive and not command.latActive
+    finally:
+      case.doCleanups()
+
+
+@pytest.mark.parametrize('alpha', (False, True))
+def test_startup_native_wait_preserves_first_lkas_through_model_loading(alpha):
+  from opendbc.car.hyundai.tests.test_palisade_2023 import params as blended_params
+  from opendbc.car.hyundai.blended_longitudinal import candidate_from_stock
+  from openpilot.cereal import log
+
+  case = caller_fixture.IoniqAvailabilityTests(methodName='runTest')
+  with OpenpilotPrefix():
+    cp = blended_params('hdaii')
+    startup = None
+    if alpha:
+      from opendbc.car.hyundai.blended_longitudinal import BlendedStartup
+      from unittest.mock import Mock
+      stock = cp
+      cp = candidate_from_stock(stock, alpha_requested=True, native_qualified=True)
+      startup = BlendedStartup(stock, cp.as_reader().as_builder(), (Mock(), Mock()))
+      assert startup.prepare(admission=lambda: True).to_dict() == cp.to_dict()
+      case.addCleanup(startup.close)
+    Params().put('LKASButtonControl', AOL_TOGGLE, block=True)
+    try:
+      sd, _, drive, card, receive = case._ioniq_availability_callers(
+        False, initially_armed=False, cp=cp, cold_start=True, startup_owner=startup)
+      original_receive = sd.sm.update_msgs
+      missing = {'aolSafetyWire', 'modelV2'}
+
+      def receive_sources(now, messages):
+        return original_receive(now, [message for message in messages if message.which() not in missing])
+
+      for name in missing:
+        sd.sm.seen[name] = sd.sm.alive[name] = sd.sm.valid[name] = False
+      with patch.object(sd.sm, 'update_msgs', side_effect=receive_sources):
+        axis, _, command = drive(0, allowed=False, native_request_lat=False, native_request_long=False)
+        assert not axis.lateralActive and not axis.longitudinalActive
+        assert not command.latActive and not command.longActive
+        assert log.OnroadEvent.EventName.commIssue in sd.events.names
+        assert log.OnroadEvent.EventName.controlsMismatch not in sd.events.names
+        assert axis.faultReason == 'availabilityPause'
+        assert not receive(10_000_000_000, axis=sd.pm.messages['aolAxisState'], event=sd.pm.messages['onroadEvents'])
+        missing.remove('aolSafetyWire')
+        axis, _, command = drive(1, allowed=False, native_request_lat=False, native_request_long=False)
+        cs = caller_fixture.car_state()
+        cs.buttonEvents = [structs.CarState.ButtonEvent(type='lkas', pressed=True)]
+        assert receive(10_010_000_000, axis=sd.pm.messages['aolAxisState'], event=sd.pm.messages['onroadEvents'], state=cs)
+        assert not command.latActive and not command.longActive
+        assert axis.faultReason == 'availabilityPause'
+        for tick in range(2, 5):
+          axis, _, command = drive(tick, allowed=False, native_request_lat=False, native_request_long=False)
+          assert receive(10_000_000_000 + tick * 10_000_000,
+                         axis=sd.pm.messages['aolAxisState'], event=sd.pm.messages['onroadEvents'])
+          assert not command.latActive and not command.longActive
+          assert axis.validUntilMonoTime - axis.observedMonoTime == 30_000_000
+        missing.clear()
+        for tick in range(5, 16):
+          axis, _, command = drive(tick, allowed=True, native_request_lat=True, native_request_long=False)
+          assert receive(10_000_000_000 + tick * 10_000_000,
+                         axis=sd.pm.messages['aolAxisState'], event=sd.pm.messages['onroadEvents'])
+        assert axis.lateralActive and command.latActive and not command.longActive
+        assert not sd.enabled and not sd.active
+        assert card.aol_card_intent.allowed_latch
+    finally:
+      case.doCleanups()
+
+
+@pytest.mark.parametrize('fault', ('invalid_native', 'missing_after_receipt', 'missing_while_enabled', 'rx_fault', 'relay_fault'))
+def test_startup_native_wait_retains_fault_and_permission_checks(fault):
+  from opendbc.car.hyundai.tests.test_palisade_2023 import params as blended_params
+  from openpilot.cereal import log
+
+  case = caller_fixture.IoniqAvailabilityTests(methodName='runTest')
+  with OpenpilotPrefix():
+    try:
+      sd, _, drive = case._authority_callers(fault == 'missing_while_enabled', cp=blended_params('hdaii'), genuine_events=True)
+      original_receive = sd.sm.update_msgs
+      missing = set()
+
+      def receive_sources(now, messages):
+        return original_receive(now, [message for message in messages if message.which() not in missing])
+
+      if fault == 'missing_after_receipt':
+        drive(0, latched=False, allowed=False, native_request_lat=False, native_request_long=False)
+        assert sd.sm.seen['aolSafetyWire']
+        missing.add('aolSafetyWire')
+      elif fault == 'missing_while_enabled':
+        missing.add('aolSafetyWire')
+        sd.sm.seen['aolSafetyWire'] = sd.sm.valid['aolSafetyWire'] = sd.sm.alive['aolSafetyWire'] = False
+      with patch.object(sd.sm, 'update_msgs', side_effect=receive_sources):
+        axis, _, command = drive(30, latched=False, allowed=False, native_request_lat=False, native_request_long=False,
+                                 native_valid=fault != 'invalid_native', panda_fault=fault == 'rx_fault',
+                                 relay_fault=fault == 'relay_fault')
+      assert log.OnroadEvent.EventName.controlsMismatch in sd.events.names
+      assert not axis.lateralActive and not axis.longitudinalActive
+      assert not command.latActive and not command.longActive
+      assert axis.faultReason == 'critical'
+    finally:
+      case.doCleanups()
+
+
+@pytest.mark.parametrize('topology', ('hdai', 'hdaii'))
+@pytest.mark.parametrize('fault', ('none', 'native_denied', 'native_invalid', 'can_invalid', 'permanent_eps',
+                                 'rx_fault', 'relay_fault', 'old_intent', 'cancel', 'wrong_gear'))
+def test_mixed_stock_cruise_off_keeps_only_fresh_permitted_lateral(topology, fault):
+  from opendbc.car.hyundai.tests.test_palisade_2023 import params as blended_params
+
+  with OpenpilotPrefix():
+    case = caller_fixture.IoniqAvailabilityTests(methodName='runTest')
+    try:
+      cp = blended_params(topology)
+      sd, _, step, card, receive = case._ioniq_availability_callers(False, cp=cp)
+      axis, _, command = step(2, brake=True, native_request_lat=True, native_request_long=False)
+      assert axis.lateralActive and command.latActive
+      assert receive(10_020_000_000, axis=sd.pm.messages['aolAxisState'], event=sd.pm.messages['onroadEvents'])
+      prior = sd.aol_published_input_proof
+      now = 10_061_516_362
+      assert now > prior[3]
+      observed = caller_fixture.car_state()
+      kwargs = {}
+      if fault == 'native_denied':
+        kwargs['allowed'] = False
+      elif fault == 'native_invalid':
+        kwargs['native_valid'] = False
+      elif fault == 'can_invalid':
+        observed.canValid = False
+      elif fault == 'permanent_eps':
+        observed.steerFaultPermanent = True
+      elif fault == 'rx_fault':
+        kwargs['panda_fault'] = True
+      elif fault == 'relay_fault':
+        kwargs['relay_fault'] = True
+      elif fault == 'old_intent':
+        kwargs['old_intent'] = True
+      elif fault == 'cancel':
+        observed.buttonEvents = [structs.CarState.ButtonEvent(type='cancel', pressed=True)]
+      elif fault == 'wrong_gear':
+        observed.gearShifter = 'unknown'
+      axis, state, command = step(6, offset_ns=1_516_362, observed_state=observed,
+                                   native_request_lat=True, native_request_long=False, **kwargs)
+      assert not command.longActive and not axis.longitudinalActive and not state.enabled
+      if fault == 'none':
+        assert axis.lateralActive and command.latActive
+        assert axis.sourceCarStateMonoTime == now and axis.validUntilMonoTime == now + 30_000_000
+        assert str(axis.faultReason) == 'none'
+        assert receive(now, axis=sd.pm.messages['aolAxisState'], event=sd.pm.messages['onroadEvents'])
+        assert card.aol_card_intent.allowed_latch
+      else:
+        assert not axis.lateralActive and not command.latActive
+    finally:
+      case.doCleanups()

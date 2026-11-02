@@ -73,6 +73,21 @@ class LifecycleShardTests(unittest.TestCase):
     self.assertCountEqual(selected, identities)
     self.assertEqual(shards, helper.partition(list(reversed(targets)), list(reversed(identities)), 2))
 
+  def test_measured_bluepilot_lifecycle_cases_split_without_omission(self):
+    module = 'openpilot/starpilot/tests/test_ford_bluepilot_library_lifecycle.py'
+    policy = helper.workload_policy()
+    self.assertTrue(policy['function_groups'][module]['independent_parameters'])
+    self.assertEqual(policy['function_groups'][module]['estimated_seconds_per_case'], 5.)
+    prefix = module.removesuffix('.py').replace('/', '.') + '.'
+    identities = [prefix + f'test_case[{index}]' for index in range(258)]
+    shards = helper.partition([module], identities, 16)
+    selected = [identity for shard in shards for identity in identities
+                if any(helper.matches(identity, target) for target in shard)]
+    self.assertCountEqual(selected, identities)
+    self.assertEqual(len(selected), 258)
+    self.assertLessEqual(max(map(len, shards)), 17)
+    self.assertEqual(shards, helper.partition([module], list(reversed(identities)), 16))
+
   def test_only_large_reviewed_heavy_functions_split_into_exact_parameter_leaves(self):
     heavy = 'openpilot/starpilot/car/toyota/tests/test_legacy_advert_callers.py'
     prefix = heavy.removesuffix('.py').replace('/', '.') + '.'
