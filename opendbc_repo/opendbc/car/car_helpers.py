@@ -15,6 +15,7 @@ from opendbc.car.ford.discovery import (normal_bus0_selection as ford_normal_bus
                                        normal_bus0_queries as ford_normal_bus0_queries, normal_bus_query_brand)
 from opendbc.car.volvo.discovery import normal_bus_topology as volvo_normal_bus_topology
 from opendbc.car.hyundai.discovery import normal_bus_topology
+from opendbc.car.tesla.discovery import hw1_normal_bus0_topology
 from opendbc.car.values import BRANDS
 from opendbc.car.vin import get_vin, is_valid_vin, VIN_UNKNOWN
 
@@ -101,14 +102,23 @@ def _gm_fw_uses_normal_bus0() -> bool:
   return bool(configured) and bool(effective) and all(request.bus == 0 for request in (*configured, *effective))
 
 
+def _tesla_fw_uses_normal_bus0() -> bool:
+  configured = fw_versions.FW_QUERY_CONFIGS['tesla'].requests
+  effective = [request for brand, _, request in fw_versions.REQUESTS if brand == 'tesla']
+  return bool(configured) and bool(effective) and all(request.bus == 0 for request in (*configured, *effective))
+
+
 # **** for use live only ****
 def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback,
-                cached_params: CarParamsT | None, *, known_gm_bus0: bool = False, known_ford_bus0: bool = False
+                cached_params: CarParamsT | None, *, known_gm_bus0: bool = False, known_ford_bus0: bool = False,
+                known_tesla_bus0: bool = False
                 ) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
   if known_ford_bus0 and (known_gm_bus0 or not ford_normal_bus0_queries()):
     raise ValueError('Ford discovery topology no longer uses normal bus 0')
   if known_gm_bus0 and not _gm_fw_uses_normal_bus0():
     raise ValueError('GM discovery topology no longer uses normal bus 0')
+  if known_tesla_bus0 and (known_gm_bus0 or known_ford_bus0 or not _tesla_fw_uses_normal_bus0()):
+    raise ValueError('Tesla discovery topology no longer uses normal bus 0')
   fixed_fingerprint = os.environ.get('FINGERPRINT', "")
   skip_fw_query = os.environ.get('SKIP_FW_QUERY', False)
   disable_fw_cache = os.environ.get('DISABLE_FW_CACHE', False)
@@ -148,16 +158,26 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
         car_fw = get_fw_versions(can_recv, can_send, set_obd_multiplexing,
                                  query_brand='ford', normal_bus_only=True)
         ecu_rx_addrs = {(fw.responseAddress, fw.subAddress or None, fw.bus) for fw in car_fw if fw.responseAddress > 0}
+      elif known_tesla_bus0:
+        # A selected Tesla needs only its declared bus0 queries, not an all-brand OBD sweep.
+        set_obd_multiplexing(False)
+        warmup_remaining = 0.1 - (time.monotonic() - start_time)
+        if warmup_remaining > 0:
+          time.sleep(warmup_remaining)
+        vin_rx_addr, vin_rx_bus, vin = get_vin(can_recv, can_send, (0,))
+        car_fw = get_fw_versions(can_recv, can_send, set_obd_multiplexing, query_brand='tesla')
+        ecu_rx_addrs = {(fw.responseAddress, fw.subAddress or None, fw.bus) for fw in car_fw if fw.responseAddress > 0}
       elif (normal_brand := normal_bus_query_brand(
           can_recv, normal_bus_topology,
           gm_probe=gm_normal_bus0_topology if _gm_fw_uses_normal_bus0() else None,
-          volvo_probe=volvo_normal_bus_topology if not fw_versions.FW_QUERY_CONFIGS['volvo'].requests else None)) is not None:
+          volvo_probe=volvo_normal_bus_topology if not fw_versions.FW_QUERY_CONFIGS['volvo'].requests else None,
+          tesla_probe=hw1_normal_bus0_topology if _tesla_fw_uses_normal_bus0() else None)) is not None:
 
         set_obd_multiplexing(False)
         warmup_remaining = 0.1 - (time.monotonic() - start_time)
         if warmup_remaining > 0:
           time.sleep(warmup_remaining)
-        vin_buses = (0,) if normal_brand in ('ford', 'gm', 'volvo') else (0, 1)
+        vin_buses = (0,) if normal_brand in ('ford', 'gm', 'volvo', 'tesla') else (0, 1)
         vin_rx_addr, vin_rx_bus, vin = get_vin(can_recv, can_send, vin_buses)
         car_fw = get_fw_versions(can_recv, can_send, set_obd_multiplexing,
                                  query_brand=normal_brand, normal_bus_only=True)
@@ -229,11 +249,15 @@ def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multip
   explicit_candidate = forced_candidate if forced_candidate is not None else os.environ.get('FINGERPRINT', '')
   known_gm_bus0 = (explicit_candidate in interface_names['gm'] and _gm_fw_uses_normal_bus0())
   known_ford_bus0 = ford_normal_bus0_selection(explicit_candidate)
+  known_tesla_bus0 = explicit_candidate in interface_names['tesla'] and _tesla_fw_uses_normal_bus0()
   if known_gm_bus0 and cached_params is not None and (
       cached_params.brand != 'gm' or cached_params.carFingerprint != explicit_candidate):
     cached_params = None
   if known_ford_bus0 and cached_params is not None and (
       cached_params.brand != 'ford' or cached_params.carFingerprint != explicit_candidate):
+    cached_params = None
+  if known_tesla_bus0 and cached_params is not None and (
+      cached_params.brand != 'tesla' or cached_params.carFingerprint != explicit_candidate):
     cached_params = None
   if known_gm_bus0:
     candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(
@@ -241,6 +265,9 @@ def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multip
   elif known_ford_bus0:
     candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(
       can_recv, can_send, set_obd_multiplexing, cached_params, known_ford_bus0=True)
+  elif known_tesla_bus0:
+    candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(
+      can_recv, can_send, set_obd_multiplexing, cached_params, known_tesla_bus0=True)
   else:
     candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(can_recv, can_send, set_obd_multiplexing, cached_params)
 
@@ -252,6 +279,10 @@ def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multip
   if candidate is None:
     carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})
     candidate = "MOCK"
+
+  if source != CarParams.FingerprintSource.fixed and candidate == 'TOYOTA_PRIUS':
+    from opendbc.car.toyota.values import automatic_prius_candidate
+    candidate = automatic_prius_candidate(candidate, car_fw)
 
   CarInterface = interfaces[candidate]
   params_options = {'auto_pedal': False} if source == CarParams.FingerprintSource.fixed and candidate in interface_names['gm'] else {}

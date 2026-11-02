@@ -47,7 +47,7 @@ jobs:
       id: setup
     - name: Build native dependencies for packaging tests
       id: build
-      run: scons -j2 openpilot/common/libparams_c.so msgq_repo/msgq/ipc_pyx.so
+      run: scons -j2 openpilot/common/libparams_c.so msgq_repo/msgq/_ipc.so
     - name: Test dependency tools
       if: ${{ !cancelled() && steps.build.outcome == 'success' }}
       run: python3 -m unittest discover -s tools/vendor/tests -v
@@ -225,6 +225,7 @@ jobs:
         openpilot/selfdrive/pandad/tests/test_pandad_canprotocol
         openpilot/selfdrive/pandad/tests/test_aol_protocol
         openpilot/selfdrive/pandad/tests/test_aol_wire
+        openpilot/selfdrive/pandad/tests/test_panda_faults
         openpilot/selfdrive/pandad/tests/test_producer_timing
         openpilot/selfdrive/pandad/tests/test_producer_sink
     - name: Test map provider to host messaging

@@ -134,3 +134,9 @@ compatible version, as the LGPL requires.
 ## Subaru angle support from jacobw
 
 The Subaru angle implementation includes work from Jacob Waller's `jul-angle-based` openpilot/opendbc branches and their upstream contributors. See [CREDITS.md](CREDITS.md#subaru-angle-steering-from-jacob-wallers-fork) and `opendbc_repo/opendbc/car/subaru/ORIGIN_HISTORY.tsv` for pinned sources, original authors and titles. The source repositories publish the comma MIT license; the complete applicable notice remains in the project `LICENSE` and `opendbc_repo/LICENSE`. StarPilot's adaptations preserve additional native and caller safety guards.
+
+## StarPilot Ford demand tuning
+
+The historical tuning formerly in `openpilot/starpilot/car/ford/starpilot_tuning.py` included the BluePilot bp-7.0-derived work identified in [CREDITS.md](CREDITS.md#starpilot-ford-demand-tuning). The published upstream license notices retained above and in the pinned BluePilot library remain applicable to the adapted source. StarPilot's separate protocol adapter does not modify those notices or resolve their scope.
+
+The angle-primary adaptation in `openpilot/starpilot/car/ford/starpilot_controller.py` is derived from BluePilot v0.2.1. It retains the complete MIT copyright and permission notice in `opendbc_repo/opendbc/bluepilot_lateral/LICENSE`, including Comma.ai, BluePilot and StarPilot contributors. See the contributor attribution in `CREDITS.md`.

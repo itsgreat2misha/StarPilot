@@ -98,12 +98,14 @@ def ford_joined(identity, alpha, hands_free, monkeypatch, record_property):
     if hasattr(monkeypatch, 'ford_bluepilot'):
       saved.put_bool('disable_BP_lat_UI', not monkeypatch.ford_bluepilot, block=True)
     if hasattr(monkeypatch, 'ford_angle'):
-      saved.put('FordPrefLateralControl', int(monkeypatch.ford_angle), block=True)
+      saved.put('FordPrefLateralControl', 3 if getattr(monkeypatch, 'ford_starpilot', False) else 1 if monkeypatch.ford_angle else 2, block=True)
     if hasattr(monkeypatch, 'ford_pinion'):
       saved.put_bool('FordPrefSteerAngleCurvature', monkeypatch.ford_pinion, block=True)
 
     for key, value in (('PauseAOLOnBrake', b'0.0'), ('CancelButtonControl', b'0'), ('MainCruiseButtonControl', b'0')):
       Path(saved.get_param_path(key)).write_bytes(value)
+    if hasattr(monkeypatch, 'ford_brake_pause'):
+      Path(saved.get_param_path('AolBrakePauseSpeedMps')).write_bytes(str(monkeypatch.ford_brake_pause).encode())
     Path(saved.get_param_path("FordHandsFreeCluster")).write_bytes(b"1" if hands_free else b"0")
     fp = gen_empty_fingerprint()
     topology = getattr(monkeypatch, 'ford_topology', 'automatic')
@@ -217,6 +219,7 @@ def run_actual_producer(ford_joined, monkeypatch, *, scenario='reverse', reengag
   lateral_name = 'LateralMotionControl2' if host.CP.flags & FordFlags.CANFD else 'LateralMotionControl'
   lateral_parser = CANParser(DBC[host.CP.carFingerprint][Bus.pt], [(lateral_name, 20)], 0)
   joined.nonzero_after_brake = 0
+  joined.path_angle_after_brake = 0
   joined.active_ui_frames = 0
   active_ui_parser = CANParser('ford_lincoln_base_pt', [('ACCDATA_3', 5)], 0)
 
@@ -561,14 +564,14 @@ def run_actual_producer(ford_joined, monkeypatch, *, scenario='reverse', reengag
             # A real native fault can precede the next 10Hz host receipt. Active
             # requests in that gap must be rejected, never treated as accepted.
             fault_before_receipt = (getattr(monkeypatch, 'ford_native_10hz', False) and
-              scenario == 'route22' and fault in ('heartbeat', 'source-loss') and permission == 0)
+              scenario in ('route22', 'brake-overlap', 'brake-pause') and fault in ('heartbeat', 'source-loss') and permission == 0)
             if fault_before_receipt and frame.address in (0x3D3, 0x3D6):
               mode = ((frame.dat[4] >> 2) & 7) if frame.address == 0x3D3 else ((frame.dat[0] >> 4) & 7)
               if mode:
                 assert not accepted, 'Native fault admitted active steering'
             if not accepted:
               display_only = frame.address in (0x18A, 0x3D8)
-              display_veto = (display_only and scenario == 'route22' and
+              display_veto = (display_only and scenario in ('route22', 'brake-overlap', 'brake-pause') and
                 fault in ('heartbeat', 'source-loss', 'rx-quality') and permission == 0)
               assert display_veto or (fault_before_receipt and not safety.get_controls_allowed()), (
                 steps, fault, hex(frame.address), bytes(frame.dat).hex(), request, native_request, permission)
@@ -596,6 +599,7 @@ def run_actual_producer(ford_joined, monkeypatch, *, scenario='reverse', reengag
                     abs(decoded['LatCtlPath_An_Actl']) > 1e-7 or abs(decoded['LatCtlCurv_No_Actl']) > 1e-7):
                   nonzero_after_brake += 1
                   joined.nonzero_after_brake = nonzero_after_brake
+                  joined.path_angle_after_brake += int(abs(decoded['LatCtlPath_An_Actl']) > 1e-7)
             elif address == 0x186:
               long_parser.update([(source_ns, [(address, bytes(data), frame.src - joined.offset)])])
               active = bool(long_parser.vl['ACCDATA']['Cmbb_B_Enbl'])
@@ -856,6 +860,28 @@ def run_actual_producer(ford_joined, monkeypatch, *, scenario='reverse', reengag
           state, axis, sd_state, command = step(engaged=True, steering=True)
         assert state.steeringPressed
         assert sd_state.alertType != 'steerSaturated/warning'
+        return
+      if scenario in ('brake-overlap', 'brake-pause'):
+        gas = 'gas' if scenario == 'brake-overlap' else None
+        for _ in range(50):
+          state, axis, sd_state, command = step(engaged=True, fault=gas)
+        assert host.aol_card_intent.allowed_latch and command.latActive
+        if scenario == 'brake-pause':
+          joined.speed = .2
+        for _ in range(60):
+          state, axis, sd_state, command = step(brake=True, fault=gas)
+          assert host.aol_card_intent.allowed_latch, (host.aol_card_intent.latch_clear_reason, transition_trace[-4:])
+          if state.brakePressed:
+            assert not command.longActive
+            paused = not state.standstill and state.vEgo < .44704
+            assert command.latActive == (not paused)
+        for _ in range(50):
+          state, axis, sd_state, command = step()
+          assert host.aol_card_intent.allowed_latch
+        assert command.latActive and not command.longActive
+        for _ in range(30):
+          state, axis, sd_state, command = step(fault='heartbeat')
+        assert not host.aol_card_intent.allowed_latch and not command.latActive and not command.longActive
         return
       if scenario == 'bluepilot-pause':
         for _ in range(41):

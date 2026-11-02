@@ -68,6 +68,7 @@ from openpilot.starpilot.car.nissan.aol import (
 )
 from openpilot.starpilot.car.hyundai.aol import aol_safety_config as hyundai_aol_safety_config, pending_stock_angle_arm
 from openpilot.starpilot.car.hyundai.aol import retained_shared_long_cancel_intent as hkg_cancel_intent_retained
+from openpilot.starpilot.car.ford.aol import brake_pause_active as ford_brake_pause_active
 from openpilot.starpilot.aol.runtime import AXIS_MAX_AGE_NS, current_axis, current_native
 from openpilot.starpilot.aol.vehicle import create_intent as create_aol_intent, native_latch_rejected, policy_for as aol_policy_for
 from openpilot.starpilot.aol.wire import IntentState, encode_intent
@@ -406,8 +407,11 @@ class Car:
     self.learning_car_state_source_ns = 0
     self.learning_applied_evidence = self.learning_previous_applied_evidence = None
     try:
-      from opendbc.car.steering_projection import install_observer
-      self.learning_stamp_observer = self.record_learning_send_stamp if install_observer(self.CI) else None
+      from openpilot.starpilot.lateral.learning_preferences import read_preference
+      preference = read_preference(self.params, self.CP)
+      if preference.valid and preference.enabled:
+        from opendbc.car.steering_projection import install_observer
+        self.learning_stamp_observer = self.record_learning_send_stamp if install_observer(self.CI) else None
     except Exception:
       pass  # Optional learning setup cannot stop native startup.
     self.aol_transport_feedback = TransportPauseFeedback(self.CP) if self.aol_replay else None
@@ -624,7 +628,8 @@ class Car:
         intent_producer_session=getattr(self, 'slc_producer_session', ''),
         main_arm_ns=getattr(self.aol_card_intent, 'main_arm_ns', 0),
         startup_calibration_pending=getattr(self.aol_card_intent, 'startup_calibration_pending', False),
-        intent_paused=getattr(self.aol_card_intent, 'pause_lateral', False))
+        intent_paused=(getattr(self.aol_card_intent, 'pause_lateral', False) or
+          ford_brake_pause_active(self.CP, CS, self.aol_settings)))
       fault_active = True if transport_reset else None
       event_ns = int(self.sm.logMonoTime['onroadEvents'])
       if (getattr(self.aol_card_intent, 'requires_fault_observation', self.aol_card_intent.explicit_latch) and
@@ -676,8 +681,9 @@ class Car:
           panda_ready=angle_panda_ready,
           restricted=(getattr(self.aol_transport_feedback, 'ordinary_warning_qualified', False) or
             restrict(self.CP, CS) or
-            ((angle_aol or mazda_aol or preap_aol or rivian_aol) and self.aol_card_intent.pause_lateral) or
+            ((angle_aol or ford_aol or mazda_aol or preap_aol or rivian_aol) and self.aol_card_intent.pause_lateral) or
             (angle_aol and CS.brakePressed and (not CS.standstill) and (CS.vEgo < self.aol_settings.pause_brake_mps)) or
+            ford_brake_pause_active(self.CP, CS, self.aol_settings) or
             (volkswagen_aol and (self.aol_card_intent.pause_lateral or
             (CS.brakePressed and (not CS.standstill) and (CS.vEgo < self.aol_card_intent.settings.pause_brake_mps))))),
           now_ns=now_ns,
@@ -931,7 +937,8 @@ class Car:
         intent_producer_session=getattr(self, 'slc_producer_session', ''),
         main_arm_ns=getattr(self.aol_card_intent, 'main_arm_ns', 0),
         startup_calibration_pending=getattr(self.aol_card_intent, 'startup_calibration_pending', False),
-        intent_paused=getattr(self.aol_card_intent, 'pause_lateral', False)):
+        intent_paused=(getattr(self.aol_card_intent, 'pause_lateral', False) or
+          ford_brake_pause_active(self.CP, CS, self.aol_settings))):
       return True
     events = self.sm['onroadEvents']
     if self.aol_transport_feedback.retention_qualified or self.aol_transport_feedback.retention_pending:
@@ -1093,6 +1100,13 @@ class Car:
       companion = messaging.new_message('starpilotCarState', valid=bool(cs_send.valid), logMonoTime=int(cs_send.logMonoTime))
       companion.starpilotCarState.lateralAuthorityUnavailable = bool(steering_authority.latched)
       companion.starpilotCarState.sourceCarStateMonoTime = int(cs_send.logMonoTime)
+    if self.CP.brand == 'tesla':
+      info = getattr(self.CI.CC, 'steering_limit_info', None)
+      if info:
+        if companion is None:
+          companion = messaging.new_message('starpilotCarState', valid=bool(cs_send.valid), logMonoTime=int(cs_send.logMonoTime))
+        companion.starpilotCarState.sourceCarStateMonoTime = int(cs_send.logMonoTime)
+        companion.starpilotCarState.steeringLimitInfo = info
     if getattr(self, 'learning_applied_evidence', None) is not None:
       try:
         from openpilot.starpilot.flm.evidence_hooks import applied_message
@@ -1219,7 +1233,7 @@ class Car:
   def radar_publish(self, RD):
     if RD is not None:
       tracks_msg = messaging.new_message('radarTracks')
-      tracks_msg.valid = not any(RD.errors.to_dict().values())
+      tracks_msg.valid = not RD.errors.canError
       tracks_msg.radarTracks = RD
       self.pm.send('radarTracks', tracks_msg)
 

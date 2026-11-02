@@ -1,6 +1,7 @@
 """BluePilot lateral: StarPilot's startup settings and the per-frame inputs its Ford CarController reads
 (opendbc bluepilot_lateral/hosts/starpilot)."""
 from collections import deque
+from dataclasses import replace
 import math
 import numpy as np
 
@@ -12,9 +13,13 @@ from opendbc.bluepilot_lateral.core.values_ext import BP_LATERAL_PARAMS
 from opendbc.bluepilot_lateral.hosts.starpilot.lateral import BluePilotLateral, FrameInputs
 from opendbc.bluepilot_lateral.core.lateral_curv_ext import PrimaryLateralControl, MAX_LATERAL_ACCEL
 from opendbc.bluepilot_lateral.core.values_ext import BP_ANGLE_LIMITS
+from opendbc.bluepilot_lateral.core.lateral_angle_ext import LateralAngleExt
+from opendbc.bluepilot_lateral.core.lateral_inputs import lateral_inputs_complete
 from opendbc.bluepilot_lateral.can.fordcan_ext import lat_ctl2_checksum, create_lat_ctl2_msg
 from opendbc.car.ford.values import CarControllerParams, FordFlags
 from opendbc.car import structs
+from opendbc.car.lateral import ISO_LATERAL_ACCEL
+from openpilot.starpilot.car.ford.controller_selection import FordController, read_controller
 
 STARTUP_KEYS = ("FordPrefSteerAngleCurvature",)
 # Global StarPilot lane settings are the only lane-positioning owner.
@@ -37,6 +42,9 @@ def startup_params(params, *, enabled: bool) -> dict[str, str]:
   safe, safe_readable = read_saved(params, "SafeMode", 8)
   if not enabled or not safe_readable or safe not in (None, b"0"):
     return {"disable_BP_lat_UI": "1"}
+  choice, _, readable = read_controller(None, params)
+  if not readable or choice is None:
+    return {"disable_BP_lat_UI": "1"}
   settings = {"disable_BP_lat_UI": "0"}
   for key in STARTUP_KEYS:
     raw, readable = read_saved(params, key, 8)
@@ -53,8 +61,11 @@ def encode(value) -> bytes:
 class BluePilotInputs:
   """Card-owned: this frame's model and vehicle-parameter inputs, and the per-frame settings (BP_LATERAL_PARAMS)."""
 
-  def __init__(self, params):
+  def __init__(self, params, cp=None):
     self.params = params
+    self.cp = cp
+    self.controller_choice = FordController.BLUEPILOT_CURVATURE
+    self.current_inputs_valid = False
     self.sm = messaging.SubMaster(["modelV2", "vehicleParameters", "lateralDelay"])
     self.frames = 0
     self.settings = []
@@ -62,9 +73,15 @@ class BluePilotInputs:
 
   def read_settings(self):
     entries = []
+    self.controller_choice = read_controller(self.cp, self.params)[0]
     for key in BP_LATERAL_PARAMS:
       try:
-        value = HOST_SETTINGS[key] if key in HOST_SETTINGS else self.params.get(key, return_default=True)
+        if key == "FordPrefLateralControl":
+          value = int(self.controller_choice in (FordController.BLUEPILOT_ANGLE, FordController.STARPILOT))
+        elif key == "disable_BP_lat_UI" and self.controller_choice is None:
+          value = True
+        else:
+          value = HOST_SETTINGS[key] if key in HOST_SETTINGS else self.params.get(key, return_default=True)
       except Exception:
         if key not in self.unknown_keys:
           cloudlog.warning(f"BluePilot lateral param {key} not registered in params_keys.h; skipping")
@@ -84,6 +101,7 @@ class BluePilotInputs:
     li, md, vp = frame.lateralInputs, self.sm["modelV2"], self.sm["vehicleParameters"]
     li.valid = bool(self.sm.seen["modelV2"] and self.sm.seen["vehicleParameters"] and
                     len(md.laneLines) >= 3 and len(md.laneLineProbs) >= 3 and len(md.laneLineStds) >= 3)
+    self.current_inputs_valid = bool(li.valid and self.sm.all_checks(["modelV2", "vehicleParameters"]))
     if li.valid:
       li.pathYawRate = list(md.orientationRate.z)
       li.pathX = list(md.position.x)
@@ -107,15 +125,22 @@ class BluePilotInputs:
 class FordBluePilotController(BluePilotLateral):
   """Keep the library's curvature handoff inside its unchanged native convergence envelope."""
 
-  def __init__(self, CP, packer, CAN):
+  def __init__(self, CP, packer, CAN, inputs_source=None):
     super().__init__(CP, packer, CAN)
+    self.inputs_source = inputs_source
+    self.starpilot_controller = None
+    self.starpilot_selected = False
+    self.starpilot_frame_valid = False
+    self.lateral_active = False
+    self.last_measured_curvature = 0.0
+    self.speed_history = deque(maxlen=6)
     self.measured_history = deque([0] * 6, maxlen=6)
     self.measured_speed = 0
     self.measured_seen = False
 
   def observe_can(self, can_list):
     # Match Panda's receive order: yaw can precede the new speed in the same batch.
-    if not self.CP.flags & FordFlags.CANFD or self.inputs.bp_pinion_curvature_enabled:
+    if not self.CP.flags & FordFlags.CANFD and not self.starpilot_selected:
       return
     for _, batch in can_list:
       for address, data, bus in batch:
@@ -124,7 +149,8 @@ class FordBluePilotController(BluePilotLateral):
         if address == 0x415 and data[2] >> 6 == 3:
           speed = np.float32(((data[0] << 8) | data[1]) * .01 * (1. / 3.6))
           self.measured_speed = math.floor(float(np.float32(speed * 1000.)) + .5)
-        elif address == 0x91 and (data[6] >> 4) & 3 == 3:
+          self.speed_history.append(self.measured_speed)
+        elif address == 0x91 and (data[6] >> 4) & 3 == 3 and not self.inputs.bp_pinion_curvature_enabled:
           yaw = np.float32(((data[2] << 8) | data[3]) * .0002 - 6.5)
           speed = np.float32(self.measured_speed / 1000.)
           curvature = np.float32(yaw / max(speed, np.float32(.1)))
@@ -132,10 +158,39 @@ class FordBluePilotController(BluePilotLateral):
           self.measured_history.append(math.floor(raw + .5) if raw >= 0 else math.ceil(raw - .5))
           self.measured_seen = True
 
+  def update(self, frame_inputs, frame):
+    selected = (self.inputs_source is not None and
+                self.inputs_source.controller_choice == FordController.STARPILOT)
+    if selected != self.starpilot_selected and self.lateral_active:
+      # Apply a controller change only after an inactive steering frame, never mid-maneuver.
+      selected = self.starpilot_selected
+      mode = int(self.curv.primary_lateral_control == PrimaryLateralControl.angle)
+      frame_inputs = replace(frame_inputs, params=[
+        FrameInputs.Param(p.key, str(mode).encode()) if p.key == "FordPrefLateralControl" else p
+        for p in frame_inputs.params])
+    if selected != self.starpilot_selected:
+      from openpilot.starpilot.car.ford.starpilot_controller import StarPilotFordController
+      self.angle = (StarPilotFordController if selected else LateralAngleExt)(self.CP, self.inputs, self.shared)
+      self.angle.bp_kappa_cmd = self.last_measured_curvature
+      self.shared.human_turn_detector.reset()
+      self.starpilot_controller = self.angle if selected else None
+    self.starpilot_selected = selected
+    self.starpilot_frame_valid = bool(frame_inputs.lateralInputs.valid and lateral_inputs_complete(frame_inputs.lateralInputs) and
+                                      getattr(self.inputs_source, "current_inputs_valid", False))
+    return super().update(frame_inputs, frame)
+
   def step_lateral(self, CC, CS, actuators, apply_curvature_last):
+    measured = self.inputs.get_current_curvature(CS)
+    self.last_measured_curvature = measured if math.isfinite(measured) else 0.0
+    self.lateral_active = bool(CC.latActive)
+    if self.starpilot_selected and (not self.starpilot_frame_valid or not self.angle.inputs_valid(CS, actuators)):
+      CC = structs.CarControl.new_message(latActive=False)
     packets, applied = super().step_lateral(CC, CS, actuators, apply_curvature_last)
+    return self._constrain_curvature(CC, CS, actuators, apply_curvature_last, packets, applied)
+
+  def _constrain_curvature(self, CC, CS, actuators, apply_curvature_last, packets, applied):
     state = CS.out
-    if (not CC.latActive or not self.CP.flags & FordFlags.CANFD or
+    if (not CC.latActive or (not self.CP.flags & FordFlags.CANFD and not self.starpilot_selected) or
         self.curv.primary_lateral_control == PrimaryLateralControl.angle or applied == 0. or
         not state.canValid or state.canTimeout or state.steerFaultTemporary or state.steerFaultPermanent or
         not math.isfinite(state.vEgoRaw) or state.vEgoRaw <= 10.):
@@ -150,7 +205,8 @@ class FordBluePilotController(BluePilotLateral):
       high = min(high, -min(self.measured_history) * .00002 + error)
     if low > high:
       return packets, applied
-    limit = min(self.curv.curvature_max, MAX_LATERAL_ACCEL / state.vEgoRaw ** 2)
+    accel_cap = MAX_LATERAL_ACCEL if self.CP.flags & FordFlags.CANFD else ISO_LATERAL_ACCEL
+    limit = min(self.curv.curvature_max, accel_cap / state.vEgoRaw ** 2)
     if state.steeringPressed and (low > limit or high < -limit):
       # Use the curvature controller's neutral reset while the driver exceeds its acceleration cap.
       inactive = structs.CarControl.new_message(latActive=False)

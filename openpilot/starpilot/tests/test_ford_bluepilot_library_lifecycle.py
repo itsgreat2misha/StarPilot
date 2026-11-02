@@ -2,18 +2,21 @@
 import pytest
 
 from opendbc.car.ford.values import CAR, FordFlags
-from openpilot.starpilot.tests.ford_lifecycle_helpers import ford_joined as ford_joined, run_actual_producer
+from openpilot.starpilot.tests.ford_lifecycle_helpers import FORD_FACTORIES, ford_joined as ford_joined, run_actual_producer
 
 
 @pytest.fixture(autouse=True)
-def library_settings(monkeypatch, mode, pinion, topology):
+def library_settings(monkeypatch, mode, pinion, topology, request):
   monkeypatch.ford_bluepilot = True
   monkeypatch.ford_angle = mode == 'angle'
+  monkeypatch.ford_starpilot = mode == 'starpilot'
   monkeypatch.ford_pinion = pinion
   monkeypatch.ford_topology = topology
   monkeypatch.ford_nonzero = True
   monkeypatch.ford_native_first_pedal = True
   monkeypatch.ford_native_10hz = True
+  if request.node.originalname == "test_brake_retains_independent_lateral_intent":
+    monkeypatch.ford_brake_pause = .44704
 
 
 @pytest.mark.parametrize('identity', [(CAR.FORD_MUSTANG_MACH_E_MK1, 2), (CAR.FORD_F_150_MK14, 2), (CAR.FORD_ESCAPE_MK4, 0)])
@@ -33,7 +36,7 @@ def test_library_angle_curvature_aol_native_lifecycle(ford_joined, monkeypatch):
 @pytest.mark.parametrize('identity,alpha,hands_free,topology,pinion', [
   ((CAR.FORD_MUSTANG_MACH_E_MK1, 2), True, True, 'automatic', False),
 ])
-@pytest.mark.parametrize('mode', ['curvature', 'angle'])
+@pytest.mark.parametrize('mode', ['curvature', 'angle', 'starpilot'])
 def test_model_loss_still_withdraws_library_output_through_actual_callers(ford_joined, monkeypatch):
   run_actual_producer(ford_joined, monkeypatch, scenario='model-loss')
 
@@ -115,3 +118,55 @@ def test_reengaging_in_a_manual_curve_respects_native_convergence(ford_joined, m
   monkeypatch.ford_curve_gas = gas
   monkeypatch.ford_curve_manual = manual
   run_actual_producer(ford_joined, monkeypatch, scenario='curvature-handoff')
+
+
+@pytest.mark.parametrize('identity,hands_free', [
+  ((CAR.FORD_MUSTANG_MACH_E_MK1, 2), True),
+])
+@pytest.mark.parametrize('alpha', [False, True])
+@pytest.mark.parametrize('topology', ['automatic', 'manual-multi'])
+@pytest.mark.parametrize('mode', ['curvature', 'angle', 'starpilot'])
+@pytest.mark.parametrize('pinion', [False, True])
+@pytest.mark.parametrize('brake_pause', [False, True], ids=['overlap', 'pause'])
+def test_brake_retains_independent_lateral_intent(ford_joined, monkeypatch, brake_pause):
+  run_actual_producer(ford_joined, monkeypatch, scenario='brake-pause' if brake_pause else 'brake-overlap')
+
+
+@pytest.mark.parametrize('identity', [identity for identity in FORD_FACTORIES if not identity[0].config.flags & FordFlags.LKA_STEERING])
+@pytest.mark.parametrize('pinion', [False, True])
+@pytest.mark.parametrize('alpha', [False, True])
+@pytest.mark.parametrize('topology', ['automatic', 'manual-multi'])
+@pytest.mark.parametrize('mode,hands_free', [('starpilot', True)])
+def test_starpilot_controller_uses_current_native_aol_path(ford_joined, monkeypatch):
+  run_actual_producer(ford_joined, monkeypatch, scenario='configuration-parity')
+  assert ford_joined.host.CI.CC.bp.starpilot_selected
+  assert ford_joined.nonzero_after_brake > 0
+
+
+@pytest.mark.parametrize('identity,mode,hands_free', [
+  ((CAR.FORD_MUSTANG_MACH_E_MK1, 2), 'starpilot', True),
+])
+@pytest.mark.parametrize('alpha', [False, True])
+@pytest.mark.parametrize('topology', ['automatic', 'manual-multi'])
+@pytest.mark.parametrize('pinion', [False, True])
+def test_starpilot_low_speed_assistance_survives_brake_with_native_limits(ford_joined, monkeypatch):
+  ford_joined.speed = 3.1
+  monkeypatch.ford_test_curvature = .03
+  run_actual_producer(ford_joined, monkeypatch, scenario='configuration-parity')
+  assert ford_joined.path_angle_after_brake > 0
+
+
+@pytest.mark.parametrize('identity', [identity for identity in FORD_FACTORIES if identity[0].config.flags & FordFlags.LKA_STEERING])
+@pytest.mark.parametrize('pinion', [False, True])
+@pytest.mark.parametrize('alpha', [False, True])
+@pytest.mark.parametrize('topology', ['automatic', 'manual-multi'])
+@pytest.mark.parametrize('mode,hands_free', [('starpilot', True)])
+def test_saved_starpilot_selection_cannot_enable_unsupported_lmc_path(ford_joined, monkeypatch):
+  assert ford_joined.host.CP.flags & FordFlags.LKA_STEERING
+  assert not ford_joined.host.CI.CC.bp.bp_lateral_allowed
+  # The nonzero-demand helper measures LMC fields; this platform steers through LKA only.
+  monkeypatch.ford_nonzero = False
+  run_actual_producer(ford_joined, monkeypatch, scenario='configuration-parity')
+  assert not ford_joined.host.CI.CC.bp.bp_lateral_allowed
+  assert ford_joined.last_lateral_packets
+  assert all(address == 0x3CA for address, _ in ford_joined.last_lateral_packets)

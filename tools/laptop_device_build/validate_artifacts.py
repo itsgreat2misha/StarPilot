@@ -9,6 +9,8 @@ from pathlib import Path
 # with no PYTHONPATH or installed workspace package.
 import importlib.util
 _spec = importlib.util.spec_from_file_location("model_file_chunker", Path(__file__).resolve().parents[2] / "openpilot/common/file_chunker.py")
+if _spec is None or _spec.loader is None:
+  raise RuntimeError("Unable to load this checkout's model file chunker")
 _chunk_owner = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_chunk_owner)
 materialize_file_chunked = _chunk_owner.materialize_file_chunked
@@ -28,8 +30,9 @@ ELF_FILES = (
   "openpilot/selfdrive/pandad/pandad",
   "openpilot/system/loggerd/loggerd",
   "openpilot/system/loggerd/encoderd",
-  "msgq_repo/msgq/ipc_pyx.so",
-  "msgq_repo/msgq/visionipc/visionipc_pyx.so",
+  "openpilot/starpilot/ui/native/_raylib_extra.so",
+  "msgq_repo/msgq/_ipc.so",
+  "msgq_repo/msgq/visionipc/_visionipc.so",
   "rednose_repo/rednose/helpers/ekf_sym_pyx.so",
   "openpilot/tools/replay/replay",
   "openpilot/tools/replay/libmedia_mux.so",
