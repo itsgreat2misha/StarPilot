@@ -29,6 +29,7 @@ from openpilot.starpilot.lateral.torque_shaping import (
   UNWIND_D_DES_THRESHOLD,
   UNWIND_LAT_ACCEL_NEAR_ZERO,
   center_chatter_friction_jerk_deadzone,
+  sigmoid as _gv70_sigmoid,
 )
 
 
@@ -43,6 +44,71 @@ from openpilot.starpilot.lateral.gv70_shaping import (
   get_genesis_gv70_stabilized_output,
   GENESIS_GV70_MEASUREMENT_DAMPING_SPEED_BP, GENESIS_GV70_MEASUREMENT_DAMPING_V,
 )
+
+
+# --- Ioniq 6 borrowables, GV70-adapted (gv70-experimental only) ---
+# SINGLE CONSTANTS TABLE for Ioniq 6 borrowables (item 1 in this commit;
+# items 2-3 are added as separate commits below, keeping this table in one place). Do not scatter GV70 borrow
+# constants elsewhere in this file: a later upstream refactor is
+# mechanical if this table stays in one place (see PR note below).
+# Sign convention VERIFIED from Nov 1 route 0000000d--5fe43b8ff6 logs:
+#   left turns (BM2/3/5, steering angle > 0) have setpoint/desLat < 0;
+#   right turns (BM4/7, steering angle < 0) have setpoint/desLat > 0.
+# Ioniq 6 code labels desLat >= 0 "left" and desLat < 0 "right" -- the
+# opposite of the GV70 log -- so values below are transferred by SIGN,
+# not by Ioniq label. The value Ioniq applies at desLat < 0 (its
+# "right" constant) is therefore the GV70 LEFT value, and vice versa.
+# Hence GV70 left gets the larger constants and GV70 right the smaller.
+# Constants below are IONIQ 6 VALUES, sign-transferred, pending GV70
+# validation (open-loop replay gating + road test); they are NOT
+# GV70-fitted values. Do not present them as GV70-tuned.
+# Item 1: crawl turn-in FF boost (Ioniq get_ioniq_6_ff_scale, crawl branch).
+GV70_CRAWL_TURN_IN_FF_BOOST_LEFT = 0.24  # Ioniq CRAWL_TURN_IN_FF_BOOST_RIGHT
+GV70_CRAWL_TURN_IN_FF_BOOST_RIGHT = 0.18  # Ioniq CRAWL_TURN_IN_FF_BOOST_LEFT
+GV70_CRAWL_TURN_IN_FF_SPEED = 5.3
+GV70_CRAWL_TURN_IN_FF_SPEED_WIDTH = 1.0
+GV70_CRAWL_TURN_IN_FF_LAT = 0.06
+GV70_CRAWL_TURN_IN_FF_LAT_WIDTH = 0.035
+
+
+# PR NOTE (applies to every helper below): each helper is an
+# experimental GV70 copy of the named Ioniq 6 helper, mirroring its
+# signature and formula for the borrowed branch only. The PR version
+# should generalize the Ioniq 6 helper to a shared helper with
+# per-car parameters (the table above) rather than duplicating it,
+# and delete these GV70 copies. ioniq6_policy.py itself is untouched
+# and no Ioniq 6 function is renamed.
+def _gv70_side_value(desired_lateral_accel: float, left_value: float, right_value: float) -> float:
+  # Mirror of _ioniq_6_side_value, with the ONE intentional sign flip:
+  # Ioniq returns left_value for desLat >= 0; GV70 left turns have
+  # desLat < 0 in the Nov 1 logs, so GV70 returns left_value for < 0.
+  return left_value if desired_lateral_accel < 0.0 else right_value
+
+
+def get_gv70_crawl_turn_in_ff_scale(desired_lateral_accel: float, desired_lateral_jerk: float, v_ego: float) -> float:
+  """Experimental GV70 copy of the crawl branch of get_ioniq_6_ff_scale.
+
+  Signature mirrors get_ioniq_6_ff_scale (desLat, jerk, v) for the
+  borrowed branch only; the non-crawl terms of that helper (turn-in
+  boost, unwind taper, directional taper, high-speed right boost) are
+  NOT borrowed and are not reproduced here. PR version should
+  generalize get_ioniq_6_ff_scale to a shared helper with per-car
+  parameters rather than duplicating it. Constants are Ioniq 6 values
+  pending GV70 validation, sign-transferred per the table above.
+  """
+  if desired_lateral_accel * desired_lateral_jerk <= 0.0:
+    return 1.0
+  crawl_speed_weight = _gv70_sigmoid((GV70_CRAWL_TURN_IN_FF_SPEED - max(v_ego, 0.0)) /
+                                     GV70_CRAWL_TURN_IN_FF_SPEED_WIDTH)
+  crawl_lat_weight = _gv70_sigmoid((abs(desired_lateral_accel) - GV70_CRAWL_TURN_IN_FF_LAT) /
+                                   GV70_CRAWL_TURN_IN_FF_LAT_WIDTH)
+  crawl_turn_in_scale = _gv70_side_value(
+    desired_lateral_accel,
+    GV70_CRAWL_TURN_IN_FF_BOOST_LEFT,
+    GV70_CRAWL_TURN_IN_FF_BOOST_RIGHT,
+  ) * crawl_speed_weight * crawl_lat_weight
+  return 1.0 + crawl_turn_in_scale
+
 
 def supported_cp(CP):
   return (
@@ -134,6 +200,10 @@ class GenesisGV70TorquePolicy:
     pid_log.error = float(error_with_lsf)
     ff = gravity_adjusted_future_lateral_accel - parent.torque_params.latAccelOffset * roll_offset_fade
     ff *= get_genesis_gv70_unwind_ff_scale(setpoint, measurement, desired_lateral_jerk, CS.vEgo)
+    # Item 1: experimental GV70 copy of the crawl branch of get_ioniq_6_ff_scale;
+    # PR version should generalize get_ioniq_6_ff_scale to a shared helper
+    # with per-car parameters rather than duplicating it.
+    ff *= get_gv70_crawl_turn_in_ff_scale(setpoint, desired_lateral_jerk, CS.vEgo)
     friction_threshold = get_genesis_gv70_friction_threshold(CS.vEgo, setpoint, desired_lateral_jerk)
     vehicle_deadzone = get_genesis_gv70_friction_jerk_deadzone(CS.vEgo, setpoint)
     friction_jerk_deadzone = center_chatter_friction_jerk_deadzone(CS.vEgo, setpoint, vehicle_deadzone)
