@@ -47,7 +47,8 @@ from openpilot.starpilot.lateral.gv70_shaping import (
 
 
 # --- Ioniq 6 borrowables, GV70-adapted (gv70-experimental only) ---
-# SINGLE CONSTANTS TABLE for items 1-3. Do not scatter GV70 borrow
+# SINGLE CONSTANTS TABLE for Ioniq 6 borrowables (items 1-2 in this commit;
+# item 3 is added as a separate commit below, keeping this table in one place). Do not scatter GV70 borrow
 # constants elsewhere in this file: a later upstream refactor is
 # mechanical if this table stays in one place (see PR note below).
 # Sign convention VERIFIED from Nov 1 route 0000000d--5fe43b8ff6 logs:
@@ -85,12 +86,6 @@ GV70_TURN_IN_FRICTION_LAT_RISE = 0.20
 GV70_TURN_IN_FRICTION_JERK_RISE = 0.24
 GV70_TURN_IN_TRANSITION_SPEED = 10.0
 GV70_TURN_IN_PHASE_SCALE = 0.10
-# Item 3: latAccelFactor multiplier (Ioniq Ioniq6TorquePolicy.FACTOR_MULT).
-# NOTE on direction: torque = latAccel / latAccelFactor, so raising the
-# factor from 1.9 to ~2.32 LOWERS unsaturated torque by 1/1.22 while
-# raising the PID latAccel limits (saturated torque unchanged at 1.0).
-# It is kept only if replay shows no worsening (see gate notes).
-GV70_LAT_ACCEL_FACTOR_MULT = 1.22
 
 
 # PR NOTE (applies to every helper below): each helper is an
@@ -209,12 +204,6 @@ class GenesisGV70TorquePolicy:
     parent.pid = PIDController([INTERP_SPEEDS, KP_INTERP], KI,
                                [GENESIS_GV70_MEASUREMENT_DAMPING_SPEED_BP, GENESIS_GV70_MEASUREMENT_DAMPING_V],
                                rate=1 / self.dt)
-    # Item 3: Ioniq 6 latAccelFactor multiplier (Ioniq6TorquePolicy.FACTOR_MULT).
-    # See table note above: this lowers unsaturated torque by 1/1.22;
-    # kept only if replay shows no worsening on approach + straight +
-    # move-off controls. PR version should take the multiplier as a
-    # per-car parameter rather than duplicating the assignment.
-    parent.torque_params.latAccelFactor *= GV70_LAT_ACCEL_FACTOR_MULT
     parent.update_limits()
     self.request_buffer_len = int(LAT_ACCEL_REQUEST_BUFFER_SECONDS / self.dt)
     self.curvature_request_buffer = deque([0.0] * self.request_buffer_len, maxlen=self.request_buffer_len)
