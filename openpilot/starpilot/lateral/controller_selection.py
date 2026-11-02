@@ -165,7 +165,11 @@ def turn_assist_supported(CP) -> bool:
 
 
 def model_turn_assist_supported(CP) -> bool:
-  return turn_assist_supported(CP) and policy_for(CP) == 'ioniq6'
+  # GV70: same model-turn-assist package as Ioniq 6 (turn lead, curvature
+  # hold, twitch guard), with all ModelTurnAssist constants unchanged.
+  # GV70 keeps its own policy ('genesis_gv70_electrified'); this only
+  # widens the controlsd assist gate, it does not rename the policy.
+  return turn_assist_supported(CP) and policy_for(CP) in ('ioniq6', 'genesis_gv70_electrified')
 
 
 def default_selection(CP) -> ControllerSelection:
