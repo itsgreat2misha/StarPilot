@@ -24,6 +24,7 @@ from opendbc.car.hyundai import hyundaicanfd, hyundaican
 from opendbc.car.hyundai.hyundaicanfd import CanBus
 from opendbc.car.hyundai.ray_pedal import create_ray_pedal_command, ray_pedal_gas, ray_pedal_enabled
 from opendbc.car.hyundai.ioniq6_longitudinal import Ioniq6LongitudinalPolicy
+from opendbc.car.hyundai.ioniq6_bsm import BlindspotStatus
 from opendbc.car.hyundai.canfd_dash_icons import CanFDDashIcons
 from opendbc.car.hyundai.classic_scc_aol import qualified as qualified_classic_stock_aol
 from opendbc.car.hyundai.classic_long_aol import AOL_EXPERIENCE, qualified as qualified_classic_long_aol
@@ -71,7 +72,7 @@ def angle_torque_reduction_gain(steering_torque, v_ego, lat_active, last_gain):
     bp4 = np.interp(v_ego, [2.0, 22.0], [400.0, 700.0])
     target = np.interp(abs(steering_torque), [bp1, bp2, bp3, bp4], [ceiling, shelf, shelf, floor])
   else:
-    target = 0.0
+    return 0.0
   return round(rate_limit(target, last_gain, -0.014, 0.004) / 0.004) * 0.004
 
 
@@ -117,7 +118,8 @@ class CarController(CarControllerBase):
     self.angle_vm = VehicleModel(CP) if CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING else None
     self.apply_angle_last = 0.0
     self.angle_gain_last = 0.0
-    self.angle_tx_recovery = (AngleTxRecovery(0x110, self.CAN.ACAN)
+    self.angle_tx_recovery = (AngleTxRecovery(0xCB, self.CAN.ECAN)
+      if pe_long_qualified(CP) or ev9_long_qualified(CP) else AngleTxRecovery(0x110, self.CAN.ACAN)
       if CP.carFingerprint in (CAR.HYUNDAI_IONIQ_5_PE, CAR.KIA_EV9) and
       (qualified_angle_aol(CP, marked_only=True) or qualified_ccnc_ev_stock(CP)) else None)
 
@@ -296,6 +298,7 @@ class CarController(CarControllerBase):
     self.frame += 1
     if _projection is not None:
       _projection.finish(new_actuators.torque)
+    can_sends.extend(CS.daw.command(now_nanos))
     return new_actuators, can_sends
 
   def create_can_msgs(self, apply_steer_req, apply_torque, torque_fault, set_speed_in_units, accel, stopping,
@@ -435,6 +438,12 @@ class CarController(CarControllerBase):
     if ev9_long:
       drive = CS.out.gearShifter == structs.CarState.GearShifter.drive
       measured = CS.angle_steering_angle
+      if self.angle_tx_recovery is not None and self.angle_tx_recovery.take_rejection(self.frame):
+        self.apply_angle_last = float(np.clip(measured, -self.params.ANGLE_LIMITS.STEER_ANGLE_MAX,
+                                              self.params.ANGLE_LIMITS.STEER_ANGLE_MAX))
+        self.angle_gain_last = 0.0
+        if self.ev9_angle_filter is not None:
+          self.ev9_angle_filter.x = self.apply_angle_last
       safety_speed = max(CS.out.vEgoRaw - 1.0, 1.0)
       bound = min(get_max_angle_vm(safety_speed, self.ev9_legacy_envelope, self.params),
                   get_max_angle_vm(safety_speed, self.angle_vm, self.params))
@@ -510,7 +519,8 @@ class CarController(CarControllerBase):
         )
     else:
       steering_status_active = CC.enabled
-      if (self.ev6_aol_status or self.CP.carFingerprint == CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN or
+      if ((self.CP.carFingerprint == CAR.KIA_CARNIVAL_2025 and self.CP.safetyConfigs[-1].safetyParam == 0x28B4) or
+          self.ev6_aol_status or self.CP.carFingerprint == CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN or
           (self.ioniq6_longitudinal is not None and
            self.CP.safetyConfigs[-1].safetyParam in (0x8815, 0x8895))):
         # AOL may steer while ordinary cruise engagement remains off.
@@ -591,6 +601,9 @@ class CarController(CarControllerBase):
           can_now_ns = getattr(CS, "ioniq6_bsm_now_ns", 0)
           status = (sources.status(can_now_ns) if sources is not None and can_now_ns > self.ioniq6_bsm_last_can_ns else None)
           if status is not None:
+            # Neutralize only the injected dashboard indication below 5 mph.
+            if CS.out.vEgoRaw < 5 * CV.MPH_TO_MS:
+              status = BlindspotStatus(0, 0)
             can_sends.extend(hyundaicanfd.create_ioniq6_blindspot_status(self.ioniq6_bsm_counter, status))
             self.ioniq6_bsm_counter = (self.ioniq6_bsm_counter + 1) & 0xff
             self.ioniq6_bsm_last_can_ns = can_now_ns
