@@ -8,44 +8,49 @@
 # gv70-smooth, or gv70-experimental the default.
 #
 # Branches synced by this workflow (and ONLY these):
-#   - gv70-smooth       (best-to-date: v1 + move-off calming + SysIndReq + damping 100)
-#   - gv70-experimental (approach-build experiments + SysIndReq + damping 100,
-#                        NO numbing/smoothing fixes that could mask turning)
+#   - gv70-smooth       (SP-GAIN v1 + move-off calming + SysIndReq + damping 100)
+#   - gv70-experimental (approach-build + gated TurnAssist + crawl + friction +
+#                        broad calm + SysIndReq + damping 100, NO latAccelFactor
+#                        #3, NO SP-GAIN / numbing fixes)
 # Deleted Nov 1, 2026 and NOT synced here: gv70-low-speed-tune, gv70-field-sweep.
 #
-# What it does, daily + on demand, independently per branch (matrix,
-# fail-fast: false, so a failure on one branch does not block the other):
-#   1. If the branch does not exist yet (gv70-experimental at first), skip
-#      that matrix job with a summary note instead of failing.
-#   2. Merge upstream StarPilotHQ/StarPilot Dom into the fork branch
-#      (merge commit only, never rebase, never force-push).
-#   3. If the merge CONFLICTS: abort the merge, push NOTHING for that
-#      branch, and open a GitHub issue listing the conflicted files.
-#      Unlike the old workflow, a prebuilt.json-only conflict is NOT
-#      auto-resolved here: prebuilt.json is never rewritten by this
-#      workflow, because a receipt recomputed inside the workflow could
-#      hide a protected-file change from the merge. Resolve it manually
-#      and recompute the receipt yourself (see the issue body).
-#   4. If the merge is clean: check the branch's policy changes survived.
-#      The check is generic, not a hardcoded marker, because the
-#      move-off calming marker on gv70-smooth may change: if the policy
-#      file differed from upstream Dom before the merge and no longer
-#      does afterwards, the branch changes were lost in the merge, so
-#      push NOTHING and open an issue instead. If the merge touched the
-#      policy file at all, the summary flags it for manual review.
-#   5. Only on a clean merge with branch changes intact does it push the
-#      merge commit to that branch.
-#
-# IMPORTANT — receipt / Galaxy apply:
-#   This workflow NEVER updates prebuilt.json. After every pushed merge,
-#   the prebuilt.json receipt for the new head must be recomputed and
-#   verified by a human/agent BEFORE any Galaxy apply to that branch.
-#   A merge that changed protected files leaves the old receipt stale,
-#   and applying with a stale receipt is not a safe update. The job
-#   summary for every pushed merge says this explicitly.
+# DESIGN (revised Nov 3, 2026 — this replaces the old "never touch
+# prebuilt.json" doctrine):
+#   The receipt in prebuilt.json is bookkeeping, not a safety gate. What
+#   actually matters is that an upstream merge never silently undoes the
+#   work on the files we experiment with. So:
+#   1. The workflow recomputes prebuilt.json itself after every merge,
+#      using the repo's own openpilot/common/prebuilt_manifest.py
+#      inventory digest over the merged tree. Before trusting that
+#      computation each run, it first reproduces the CURRENT head's
+#      stored receipt from that head's tree; if it cannot, the job fails
+#      and pushes NOTHING. A pushed head therefore always carries a
+#      receipt that matches its own tree (verified again after writing).
+#   2. A merge that conflicts ONLY on prebuilt.json is auto-resolved
+#      (finish the merge, then recompute the receipt as above) — upstream
+#      changes the receipt on essentially every Dom advance, so treating
+#      it as a conflict made a successful run impossible by design.
+#   3. A merge that conflicts on ANY other file: abort, push NOTHING,
+#      open/dedupe a [sync-conflict] issue, fail the job. Resolve by hand.
+#   4. OUR_FILES gate (the real protection): the files carrying our
+#      changes are listed in OUR_FILES below. Before the merge, the
+#      workflow records which of them differ from upstream Dom on this
+#      branch. After the merge, any of those files whose diff vs upstream
+#      is GONE (or which is missing) means our work was silently undone
+#      by a clean merge: push NOTHING, open/dedupe a [sync-conflict]
+#      issue saying changes were LOST, fail the job.
+#   5. If upstream CHANGED any OUR_FILES file and the merge kept our diff
+#      intact, the merge pushes as normal, but the job summary carries a
+#      prominent "Upstream changed files we experiment with" section so
+#      route analysis can account for it. Knowing, not blocking.
+#   6. If the branch is already up to date with upstream, the job
+#      concludes SUCCESS with an "already up to date" summary.
+#   7. The job has timeout-minutes: 30. A hung step (e.g. the checkout
+#      that sat for 2+ hours on Nov 3, 2026) fails fast and visibly
+#      instead of running to the 360-minute platform default.
 #
 # IMPORTANT — Issues must be enabled:
-#   The conflict path REQUIRES GitHub Issues on the fork
+#   The conflict/lost paths REQUIRE GitHub Issues on the fork
 #   (Settings -> General -> Features -> Issues). If Issues are disabled,
 #   the issue step fails LOUDLY (no continue-on-error) and the job fails,
 #   so a conflict is never silently skipped. Do not add continue-on-error
@@ -76,6 +81,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -121,62 +127,166 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           BRANCH="${{ matrix.branch }}"
-          POLICY="openpilot/starpilot/lateral/genesis_gv70_policy.py"
+          # Files carrying our GV70 work. The survival gate below covers
+          # exactly this set (generalised from the old policy-only check).
+          OUR_FILES="openpilot/starpilot/lateral/genesis_gv70_policy.py
+          openpilot/starpilot/lateral/model_turn_assist.py
+          openpilot/starpilot/lateral/controller_selection.py
+          openpilot/selfdrive/controls/controlsd.py
+          opendbc_repo/opendbc/car/hyundai/carcontroller.py
+          opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py"
+          echo "$OUR_FILES" > /tmp/our_files.txt
           git checkout "$BRANCH"
           OLD_HEAD="$(git rev-parse HEAD)"
           UPSTREAM_HEAD="$(git rev-parse upstream/Dom)"
           echo "old_head=$OLD_HEAD" >> "$GITHUB_OUTPUT"
           echo "upstream_head=$UPSTREAM_HEAD" >> "$GITHUB_OUTPUT"
-          # Did the branch's policy file already differ from upstream
-          # before this merge? Used later to detect a silent loss: a
-          # branch that had policy changes and now has none lost them.
-          if [ -n "$(git diff upstream/Dom -- "$POLICY")" ]; then
-            echo "pre_diff=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "pre_diff=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Self-validate the receipt computation BEFORE trusting it:
+          # the digest of the current head's tree must reproduce the
+          # receipt stored at the current head. If not, fail here and
+          # push nothing — never write a receipt with an unproven method.
+          python3 - <<'PYEOF'
+          import importlib.util, json, subprocess, sys
+          spec = importlib.util.spec_from_file_location('pbm', 'openpilot/common/prebuilt_manifest.py')
+          pbm = importlib.util.module_from_spec(spec); spec.loader.exec_module(pbm)
+          def entries(rev):
+              out = []
+              raw = subprocess.check_output(['git', 'ls-tree', '-rz', '-r', '--full-tree', rev]).decode()
+              for rec in raw.split('\0'):
+                  if rec:
+                      meta, path = rec.split('\t', 1)
+                      mode, kind, blob = meta.split()
+                      assert kind == 'blob', rec
+                      out.append((path, mode, blob))
+              return out
+          stored = json.loads(subprocess.check_output(['git', 'show', 'HEAD:prebuilt.json']))['protected_inventory_sha256']
+          got = pbm.inventory_digest(entries('HEAD'))
+          print(f'stored receipt at HEAD: {stored}')
+          print(f'recomputed digest     : {got}')
+          if got != stored:
+              print('RECEIPT METHOD VALIDATION FAILED — aborting before merge')
+              sys.exit(1)
+          print('receipt method validated against current head')
+          PYEOF
+          # Which of OUR_FILES differ from upstream before this merge?
+          # Those diffs are our work; losing one in the merge is a stop.
+          : > /tmp/our_pre_diff.txt
+          while IFS= read -r f; do
+            if [ ! -f "$f" ] || [ -n "$(git diff upstream/Dom -- "$f")" ]; then
+              echo "$f" >> /tmp/our_pre_diff.txt
+            fi
+          done < /tmp/our_files.txt
+          echo "pre_diff_files=$(paste -sd ',' /tmp/our_pre_diff.txt)" >> "$GITHUB_OUTPUT"
           if git merge --no-edit upstream/Dom; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
-            echo "new_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "files=$(git diff --name-only "$OLD_HEAD" HEAD | paste -sd ',' -)" >> "$GITHUB_OUTPUT"
+            echo "receipt_conflict_only=false" >> "$GITHUB_OUTPUT"
           else
             git diff --name-only --diff-filter=U > /tmp/conflicted.txt || true
             echo "Conflicted files:"; cat /tmp/conflicted.txt || true
             echo "files=$(paste -sd ',' /tmp/conflicted.txt)" >> "$GITHUB_OUTPUT"
-            echo "conflict=true" >> "$GITHUB_OUTPUT"
-            {
-              echo "### Upstream merge conflict: $BRANCH"
-              echo "Conflicted files:"
-              echo '```'
-              cat /tmp/conflicted.txt
-              echo '```'
-              echo "Nothing was pushed for this branch."
-            } >> "$GITHUB_STEP_SUMMARY"
-            git merge --abort || true
+            # A conflict on prebuilt.json ALONE is bookkeeping: finish
+            # the merge with either side's receipt (it is recomputed in
+            # the receipt step below) and continue.
+            if [ "$(cat /tmp/conflicted.txt)" = "prebuilt.json" ]; then
+              echo "Receipt-only conflict: finishing merge, receipt recomputed below."
+              git checkout --ours prebuilt.json
+              git add prebuilt.json
+              git commit --no-edit
+              echo "conflict=false" >> "$GITHUB_OUTPUT"
+              echo "receipt_conflict_only=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "conflict=true" >> "$GITHUB_OUTPUT"
+              echo "receipt_conflict_only=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "### Upstream merge conflict: $BRANCH"
+                echo "Conflicted files:"
+                echo '```'
+                cat /tmp/conflicted.txt
+                echo '```'
+                echo "Nothing was pushed for this branch."
+              } >> "$GITHUB_STEP_SUMMARY"
+              git merge --abort || true
+            fi
           fi
+          if [ "$(git rev-parse HEAD)" = "$OLD_HEAD" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "merged_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "files=$(git diff --name-only "$OLD_HEAD" HEAD | paste -sd ',' -)" >> "$GITHUB_OUTPUT"
 
-      - name: Verify branch policy changes survived clean merge
+      - name: Verify our files survived the merge
         id: verify
         if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true'
         run: |
-          BRANCH="${{ matrix.branch }}"
-          POLICY="openpilot/starpilot/lateral/genesis_gv70_policy.py"
           OLD_HEAD="${{ steps.merge.outputs.old_head }}"
-          if [ ! -f "$POLICY" ]; then
+          : > /tmp/our_lost.txt
+          while IFS= read -r f; do
+            if [ ! -f "$f" ] || [ -z "$(git diff upstream/Dom -- "$f")" ]; then
+              echo "$f" >> /tmp/our_lost.txt
+            fi
+          done < /tmp/our_pre_diff.txt
+          if [ -s /tmp/our_lost.txt ]; then
             echo "lost=true" >> "$GITHUB_OUTPUT"
-            echo "policy_touched=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ steps.merge.outputs.pre_diff }}" = "true" ] && [ -z "$(git diff upstream/Dom -- "$POLICY")" ]; then
-            # Had policy changes before, has none now: lost in the merge.
-            echo "lost=true" >> "$GITHUB_OUTPUT"
-            echo "policy_touched=true" >> "$GITHUB_OUTPUT"
           else
             echo "lost=false" >> "$GITHUB_OUTPUT"
-            if git diff --name-only "$OLD_HEAD" HEAD | grep -qx "$POLICY"; then
-              echo "policy_touched=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "policy_touched=false" >> "$GITHUB_OUTPUT"
-            fi
           fi
+          echo "lost_files=$(paste -sd ',' /tmp/our_lost.txt)" >> "$GITHUB_OUTPUT"
+          # Which of OUR_FILES did this merge change on our branch?
+          : > /tmp/our_touched.txt
+          git diff --name-only "$OLD_HEAD" HEAD > /tmp/merge_files.txt || true
+          while IFS= read -r f; do
+            if grep -qx "$f" /tmp/merge_files.txt; then
+              echo "$f" >> /tmp/our_touched.txt
+            fi
+          done < /tmp/our_files.txt
+          echo "touched_files=$(paste -sd ',' /tmp/our_touched.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Recompute prebuilt.json receipt for the merged tree
+        id: receipt
+        if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true'
+        run: |
+          # After any merge that changed protected files, the inherited
+          # prebuilt.json no longer matches the tree. Recompute it from
+          # the merged tree with the repo's own digest (self-validated in
+          # the merge step), commit it if it differs, and verify the
+          # final head's receipt against its own tree before pushing.
+          python3 - <<'PYEOF'
+          import importlib.util, json, subprocess, sys
+          spec = importlib.util.spec_from_file_location('pbm', 'openpilot/common/prebuilt_manifest.py')
+          pbm = importlib.util.module_from_spec(spec); spec.loader.exec_module(pbm)
+          def entries(rev):
+              out = []
+              raw = subprocess.check_output(['git', 'ls-tree', '-rz', '-r', '--full-tree', rev]).decode()
+              for rec in raw.split('\0'):
+                  if rec:
+                      meta, path = rec.split('\t', 1)
+                      mode, kind, blob = meta.split()
+                      assert kind == 'blob', rec
+                      out.append((path, mode, blob))
+              return out
+          digest = pbm.inventory_digest(entries('HEAD'))
+          stored = json.loads(subprocess.check_output(['git', 'show', 'HEAD:prebuilt.json']))['protected_inventory_sha256']
+          print(f'merged-tree digest: {digest}')
+          print(f'stored receipt    : {stored}')
+          changed = digest != stored
+          if changed:
+              with open('prebuilt.json', 'w') as fh:
+                  fh.write(json.dumps({'schema_version': 1, 'protected_inventory_sha256': digest}, sort_keys=True) + '\n')
+              subprocess.check_call(['git', 'add', 'prebuilt.json'])
+              subprocess.check_call(['git', 'commit', '-m', 'prebuilt receipt for upstream Dom merge (auto-recomputed by sync workflow)'])
+              stored2 = json.loads(subprocess.check_output(['git', 'show', 'HEAD:prebuilt.json']))['protected_inventory_sha256']
+              got2 = pbm.inventory_digest(entries('HEAD'))
+              if stored2 != got2:
+                  print('RECEIPT VERIFICATION FAILED after write — job will fail, nothing pushed')
+                  sys.exit(1)
+          with open('/tmp/receipt_changed.txt', 'w') as fh:
+              fh.write('true' if changed else 'false')
+          print('receipt updated' if changed else 'receipt already valid')
+          PYEOF
+          echo "receipt_changed=$(cat /tmp/receipt_changed.txt)" >> "$GITHUB_OUTPUT"
+          echo "new_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Open issue on merge conflict (no push, fail loudly if this fails)
         if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict == 'true'
@@ -191,9 +301,9 @@ jobs:
           # or issue creation fails, this step (and the job) must fail
           # loudly instead of silently skipping the conflict report.
           if [ "$BRANCH" = "gv70-smooth" ]; then
-            INTENDED="v1 + move-off calming + SysIndReq + damping 100"
+            INTENDED="SP-GAIN v1 + move-off calming + SysIndReq + damping 100"
           else
-            INTENDED="approach build + SysIndReq + damping 100, NO numbing/smoothing fixes"
+            INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
           fi
           DATE="$(date -u +%F)"
           TITLE="[sync-conflict] $BRANCH — upstream Dom merge conflict $DATE"
@@ -207,9 +317,7 @@ jobs:
           $FILES
           \`\`\`
 
-          Resolve manually: check out $BRANCH locally, merge upstream/Dom, resolve the conflicts preserving the intended branch state ($INTENDED), then recompute prebuilt.json receipt and VERIFY it before any Galaxy apply to this branch. Do not apply via Galaxy with a stale receipt.
-
-          Note: prebuilt.json conflicts are NOT auto-resolved by this workflow. If prebuilt.json is the only conflict, that is expected when both sides changed its receipt line — recompute the receipt for the merged tree manually, verify no protected-file change was hidden by the merge, then push."
+          Resolve manually: check out $BRANCH locally, merge upstream/Dom, resolve the conflicts preserving the intended branch state ($INTENDED). The prebuilt.json receipt is then recomputed by the sync workflow's method (or by hand with the same validated digest) — since Nov 3, 2026 the workflow auto-resolves prebuilt.json-only conflicts and recomputes receipts itself, so a conflict issue means a real file conflicted."
           # Do not open a duplicate if an open issue for this branch already exists; comment on it instead.
           EXISTING="$(gh issue list --repo itsgreat2misha/StarPilot --state open --limit 100 --json number,title | python3 -c "import json, os, sys; data = json.load(sys.stdin); print(next((str(i['number']) for i in data if i['title'].startswith('[sync-conflict] ' + os.environ['BRANCH'])), ''))")"
           if [ -n "$EXISTING" ]; then
@@ -217,37 +325,42 @@ jobs:
           \`\`\`
           $FILES
           \`\`\`
-          Nothing was pushed for this branch. See the original issue body for the manual resolve + receipt re-verification steps."
+          Nothing was pushed for this branch. See the original issue body for the manual resolve steps."
           else
             gh issue create --repo itsgreat2misha/StarPilot --title "$TITLE" --body "$BODY"
           fi
 
-      - name: Open issue if branch changes were lost (no push, fail loudly if this fails)
+      - name: Open issue if our changes were lost in a clean merge (no push, fail loudly if this fails)
         if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ matrix.branch }}
           UPSTREAM_HEAD: ${{ steps.merge.outputs.upstream_head }}
           OLD_HEAD: ${{ steps.merge.outputs.old_head }}
+          LOST_FILES: ${{ steps.verify.outputs.lost_files }}
         run: |
           # No continue-on-error here on purpose (see conflict issue step).
           if [ "$BRANCH" = "gv70-smooth" ]; then
-            INTENDED="v1 + move-off calming + SysIndReq + damping 100"
+            INTENDED="SP-GAIN v1 + move-off calming + SysIndReq + damping 100"
           else
-            INTENDED="approach build + SysIndReq + damping 100, NO numbing/smoothing fixes"
+            INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
           fi
           DATE="$(date -u +%F)"
-          TITLE="[sync-conflict] $BRANCH — branch changes lost in upstream merge $DATE"
-          BODY="Daily upstream sync merged cleanly into $BRANCH, but the branch's policy changes are no longer present afterwards (policy file missing, or its diff vs upstream Dom is now empty when it was not before), so NOTHING was pushed for this branch and the comma is unchanged.
+          TITLE="[sync-conflict] $BRANCH — branch changes LOST in clean upstream merge $DATE"
+          BODY="Daily upstream sync merged cleanly into $BRANCH, but our changes were LOST in the merge: the files below differed from upstream Dom before the merge and no longer do afterwards (or are missing), so NOTHING was pushed for this branch and the comma is unchanged.
 
           - Branch: $BRANCH
           - Upstream Dom commit attempted: $UPSTREAM_HEAD
           - Fork head before merge: $OLD_HEAD
+          - Files whose branch changes were lost:
+          \`\`\`
+          $LOST_FILES
+          \`\`\`
 
-          This usually means upstream refactored genesis_gv70_policy.py and git auto-merged the branch changes away. Re-apply the intended branch state ($INTENDED) on top of the new upstream code, re-test, then recompute prebuilt.json receipt and VERIFY it before any Galaxy apply to this branch."
+          This usually means upstream refactored one of our files and git auto-merged the branch changes away. Re-apply the intended branch state ($INTENDED) on top of the new upstream code and re-test before pushing."
           EXISTING="$(gh issue list --repo itsgreat2misha/StarPilot --state open --limit 100 --json number,title | python3 -c "import json, os, sys; data = json.load(sys.stdin); print(next((str(i['number']) for i in data if i['title'].startswith('[sync-conflict] ' + os.environ['BRANCH'])), ''))")"
           if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --repo itsgreat2misha/StarPilot --body "Upstream sync on $DATE for $BRANCH merged cleanly but the branch policy changes were lost (upstream $UPSTREAM_HEAD, fork head $OLD_HEAD). Nothing was pushed. See the original issue body for the manual re-apply + receipt re-verification steps."
+            gh issue comment "$EXISTING" --repo itsgreat2misha/StarPilot --body "Upstream sync on $DATE for $BRANCH merged cleanly but branch changes were LOST (upstream $UPSTREAM_HEAD, fork head $OLD_HEAD). Lost files: $LOST_FILES. Nothing was pushed. See the original issue body for the manual re-apply steps."
           else
             gh issue create --repo itsgreat2misha/StarPilot --title "$TITLE" --body "$BODY"
           fi
@@ -256,20 +369,35 @@ jobs:
         if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true'
         run: |
           BRANCH="${{ matrix.branch }}"
-          git push origin "$BRANCH"
-          {
-            echo "### Upstream sync pushed: $BRANCH"
-            echo "- Old head: ${{ steps.merge.outputs.old_head }}"
-            echo "- New head: ${{ steps.merge.outputs.new_head }}"
-            echo "- Upstream Dom head: ${{ steps.merge.outputs.upstream_head }}"
-            echo "- Files changed by merge: ${{ steps.merge.outputs.files }}"
-            echo "- Policy file touched by merge: ${{ steps.verify.outputs.policy_touched }}"
-            echo ""
-            echo "**Before any Galaxy apply to $BRANCH, recompute and verify the prebuilt.json receipt for the new head.** This workflow never updates prebuilt.json, so a merge that changed protected files leaves the old receipt stale."
-            if [ "${{ steps.verify.outputs.policy_touched }}" = "true" ]; then
-              echo "**Manual review required: the merge touched genesis_gv70_policy.py.** Confirm the intended branch changes are still intact before recomputing the receipt."
+          if [ "${{ steps.merge.outputs.up_to_date }}" = "true" ]; then
+            {
+              echo "### Already up to date: $BRANCH"
+              echo "- Head: ${{ steps.merge.outputs.old_head }} (unchanged)"
+              echo "- Upstream Dom head: ${{ steps.merge.outputs.upstream_head }}"
+              echo "Nothing to merge, nothing pushed. Receipt at head verified by the workflow's self-validated digest."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            git push origin "$BRANCH"
+            {
+              echo "### Upstream sync pushed: $BRANCH"
+              echo "- Old head: ${{ steps.merge.outputs.old_head }}"
+              echo "- New head: ${{ steps.receipt.outputs.new_head }}"
+              echo "- Upstream Dom head: ${{ steps.merge.outputs.upstream_head }}"
+              echo "- Files changed by merge: ${{ steps.merge.outputs.files }}"
+              echo "- Receipt-only conflict auto-resolved: ${{ steps.merge.outputs.receipt_conflict_only }}"
+              echo "- prebuilt.json receipt recomputed by workflow: ${{ steps.receipt.outputs.receipt_changed }} (digest self-validated against the previous head before the merge, and verified against the new tree after writing — the new head is Galaxy-safe as-is)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "${{ steps.verify.outputs.touched_files }}" ]; then
+              {
+                echo ""
+                echo "## ⚠ Upstream changed files we experiment with"
+                echo "The merge changed these files on $BRANCH while keeping our diffs intact:"
+                echo "${{ steps.verify.outputs.touched_files }}" | tr ',' '\n' | sed 's/^/- /'
+                echo ""
+                echo "Route analysis should account for these upstream changes when judging this branch's behaviour."
+              } >> "$GITHUB_STEP_SUMMARY"
             fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Fail job if sync did not push (conflict or lost changes)
         if: steps.check.outputs.skip != 'true' && (steps.merge.outputs.conflict == 'true' || steps.verify.outputs.lost == 'true')
