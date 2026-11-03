@@ -175,6 +175,13 @@ def model_turn_assist_supported(CP) -> bool:
   return turn_assist_supported(CP) and policy_for(CP) in ('ioniq6', 'genesis_gv70_electrified')
 
 
+def model_turn_assist_gv70_lead_gate(CP) -> bool:
+  # True only for the GV70: controlsd uses this to enable the
+  # GV70-only turn-lead gate (near/onset/ratio checks + wider lead
+  # speed range) in ModelTurnAssist. Ioniq 6 never enables it.
+  return turn_assist_supported(CP) and policy_for(CP) == 'genesis_gv70_electrified'
+
+
 def default_selection(CP) -> ControllerSelection:
   policy = policy_for(CP)
   from openpilot.starpilot.lateral.hkg_vehicle_policy import PROFILES
