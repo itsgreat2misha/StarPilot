@@ -86,6 +86,22 @@ GV70_TURN_IN_FRICTION_LAT_RISE = 0.20
 GV70_TURN_IN_FRICTION_JERK_RISE = 0.24
 GV70_TURN_IN_TRANSITION_SPEED = 10.0
 GV70_TURN_IN_PHASE_SCALE = 0.10
+# Broader low-speed calming (gv70-experimental only). The LSF reduction
+# strength is exactly smooth's move-off calming: the setpoint smoothstep
+# below returns 0 at |setpoint| <= 0.30 (full LSF reduction) and 1 at
+# |setpoint| >= 0.50 (no LSF reduction). Only the trigger is broader:
+# smooth's standstill-history move-off path is retained, and a second
+# state-based path covers decelerating approaches that never stood still
+# (Route C BM4). The speed-entry path uses 4.0/4.5 m/s hysteresis and a
+# 1.5 s ramp-in; loss of either trigger releases the amount over 0.3 s.
+GV70_CALM_SETPOINT_START = 0.30
+GV70_CALM_SETPOINT_FULL = 0.50
+GV70_CALM_MOVEOFF_FRAMES = 600
+GV70_CALM_MOVEOFF_MAX_SPEED = 9.0
+GV70_CALM_ENTER_SPEED = 4.0
+GV70_CALM_EXIT_SPEED = 4.5
+GV70_CALM_RAMP_IN_SECONDS = 1.5
+GV70_CALM_RAMP_OUT_SECONDS = 0.3
 
 
 # PR NOTE (applies to every helper below): each helper is an
@@ -215,6 +231,9 @@ class GenesisGV70TorquePolicy:
     self.prev_output_torque = 0.0
     self.previous_feedforward = None
     self.low_speed_reset_threshold = max(CP.minSteerSpeed, 0.3)
+    self._moveoff_frames = 0
+    self._calm_lsf_amount = 0.0
+    self._calm_speed_band = False
     # Approach-build state (gv70-experimental only, precision over comfort).
     # 50 frames = ~0.5 s at 100 Hz; boost is a magnitude in lateral-accel
     # units, ramped at 0.05/frame, and is added to feedforward only.
@@ -232,6 +251,9 @@ class GenesisGV70TorquePolicy:
       parent.pid.reset()
       self.prev_output_torque = 0.0
       self.previous_feedforward = None
+      self._moveoff_frames = 0
+      self._calm_lsf_amount = 0.0
+      self._calm_speed_band = False
       self.approach_boost = 0.0
       self.approach_curv_hist.append(desired_curvature)
       self.curvature_request_buffer.append(desired_curvature)
@@ -265,7 +287,37 @@ class GenesisGV70TorquePolicy:
     measurement_rate = self.measurement_rate_filter.update((measurement - self.previous_measurement) / self.dt)
     measurement_rate = float(np.clip(measurement_rate, -MAX_LAT_JERK_UP, MAX_LAT_JERK_UP))
     self.previous_measurement = measurement
+    # Broader low-speed calming. First reproduce smooth's setpoint gate
+    # exactly: 0 at |setpoint| <= 0.30, 1 at >= 0.50, smoothstep between.
+    # The amount state controls how much of that reduction is currently
+    # applied, so changes in the speed-entry path are ramped rather than
+    # stepped. At |setpoint| >= 0.50 the effective scale is 1 regardless
+    # of amount, so a real turn restores full LSF immediately.
+    if CS.standstill:
+      self._moveoff_frames = 0
+    else:
+      self._moveoff_frames += 1
+    if CS.vEgo <= GV70_CALM_ENTER_SPEED:
+      self._calm_speed_band = True
+    elif CS.vEgo >= GV70_CALM_EXIT_SPEED:
+      self._calm_speed_band = False
+    _calm_setpoint_scale_t = float(np.clip((abs(setpoint) - GV70_CALM_SETPOINT_START) /
+                                           (GV70_CALM_SETPOINT_FULL - GV70_CALM_SETPOINT_START), 0.0, 1.0))
+    _calm_setpoint_scale = _calm_setpoint_scale_t * _calm_setpoint_scale_t * (3.0 - 2.0 * _calm_setpoint_scale_t)
+    _moveoff_calm = (self._moveoff_frames <= GV70_CALM_MOVEOFF_FRAMES and CS.vEgo < GV70_CALM_MOVEOFF_MAX_SPEED and
+                     abs(setpoint) < GV70_CALM_SETPOINT_FULL)
+    _speed_entry_calm = self._calm_speed_band and abs(setpoint) < GV70_CALM_SETPOINT_FULL
+    if _moveoff_calm:
+      # A true move-off is eligible from its first frames, as on smooth;
+      # standstill history is itself the dwell/confirmation.
+      self._calm_lsf_amount = 1.0
+    elif _speed_entry_calm:
+      self._calm_lsf_amount = min(1.0, self._calm_lsf_amount + self.dt / GV70_CALM_RAMP_IN_SECONDS)
+    else:
+      self._calm_lsf_amount = max(0.0, self._calm_lsf_amount - self.dt / GV70_CALM_RAMP_OUT_SECONDS)
+    _lsf_scale = 1.0 - self._calm_lsf_amount * (1.0 - _calm_setpoint_scale)
     low_speed_factor = (np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y) / max(CS.vEgo, MIN_SPEED)) ** 2
+    low_speed_factor *= _lsf_scale
     current_kp = np.interp(CS.vEgo, parent.pid._k_p[0], parent.pid._k_p[1])
     error = setpoint - measurement
     error_with_lsf = error * (1 + low_speed_factor / max(current_kp, 1e-3))
