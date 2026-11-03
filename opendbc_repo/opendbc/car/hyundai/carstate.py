@@ -62,6 +62,8 @@ def get_non_scc_cruise_signals(flags: int, car=None) -> tuple[str, str, str, str
 class CarState(CarStateBase):
   def __init__(self, CP):
     super().__init__(CP)
+    from opendbc.car.hyundai.daw import DawSource
+    self.daw = DawSource(CP)
     self.forte_lkas_sources = NonSccLkasSources() if qualified_non_scc(CP) and CP.flags & HyundaiFlags.HAS_LDA_BUTTON else None
     if (qualified_classic_scc(CP) or qualified_classic_long(CP)) and CP.flags & HyundaiFlags.HAS_LDA_BUTTON:
       self.forte_lkas_sources = ClassicSccLkasSources(CP.carFingerprint)
@@ -130,6 +132,7 @@ class CarState(CarStateBase):
     self.ccnc_162_ts_ns = 0
     self.ccnc_1b5_ts_ns = 0
     self.dashboard_limit = LimitTracker()
+    self.dashboard_stop_sign = None
     self.ioniq6_bsm_sources = (Ioniq6BlindspotSources()
                                if CP.carFingerprint == CAR.HYUNDAI_IONIQ_6 and CP.openpilotLongitudinalControl else None)
     self.ioniq6_bsm_now_ns = 0
@@ -604,6 +607,9 @@ class CarState(CarStateBase):
       status, value_mps = hyundai_canfd_sign(speed, system_status, self.is_metric)
       self.dashboard_limit.update(timestamp, status, value_mps, valid_until_ns=expiry)
 
+    stamp = cp_cam.ts_nanos["ADAS_0x380"]["STOP_SIGN"]
+    self.dashboard_stop_sign = (bool(cp_cam.vl["ADAS_0x380"]["STOP_SIGN"]), stamp) if stamp > 0 else None
+
     return ret
 
   def get_can_parsers_canfd(self, CP):
@@ -663,6 +669,12 @@ class CarState(CarStateBase):
         msgs.append(("CRUISE_BUTTONS_ALT", math.nan))
       if not (ev9_long_qualified(CP) or pe_long_qualified(CP)):
         (cam_msgs if CP.flags & HyundaiFlags.CANFD_CAMERA_SCC else msgs).append(("SCC_CONTROL", 50))
+    elif CP.carFingerprint == CAR.KIA_CARNIVAL_2025 and CP.openpilotLongitudinalControl and CP.safetyConfigs[-1].safetyParam in (0x20B4, 0x28B4):
+      msgs = [(name, frequency) for name, frequency in msgs if name != "CRUISE_BUTTONS_ALT"]
+      msgs.extend((("CRUISE_BUTTONS_ALT", 50), ("ACCELERATOR_BRAKE_ALT", 100), ("TCS", 50),
+                   ("WHEEL_SPEEDS", 100), ("MDPS", 100), (self.gear_msg_canfd, 100),
+                   ("STEERING_SENSORS", 100), ("DOORS_SEATBELTS", 10), ("BLINKERS", 10), ("SCC_CONTROL", math.nan)))
+      cam_msgs.append(("CAM_0x362", 20))
     elif torque_ev_scc_eligible(CP):
       msgs.extend(((self.accelerator_msg_canfd, 100), ("TCS", 50), ("WHEEL_SPEEDS", 100), ("MDPS", 100)))
       msgs.extend((("CRUISE_BUTTONS_ALT", math.nan), ("DOORS_SEATBELTS", math.nan),
@@ -699,6 +711,7 @@ class CarState(CarStateBase):
         msgs.append(("SCC_CONTROL", 50))
       if ("CAM_0x2a4", 20) not in cam_msgs:
         cam_msgs.append(("CAM_0x2a4", 20))
+    cam_msgs.append(("ADAS_0x380", math.nan))
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], msgs, CanBus(CP).ECAN),
       # Native CANParser accepts NaN to subscribe without a CAN-valid frequency gate.

@@ -39,10 +39,16 @@ FORD_BLUEPILOT_NATIVE_TARGETS = tuple(str(path.relative_to(ROOT)) for path in so
 # Representative production callers plus their source/native refusal cases.
 # The emitted selected_test_ids record exact parametrized configurations.
 AOL_LIFECYCLE_TARGETS = (
+  'opendbc_repo/opendbc/car/tests/test_isotp_query_interference.py',
   'openpilot/starpilot/aol/tests/test_mazda_source_deadline.py',
   "openpilot/starpilot/aol/tests/test_gv60_hda1_alpha_aol.py",
   "opendbc_repo/opendbc/car/hyundai/tests/test_torque_ev_deferred_takeover.py",
   'openpilot/starpilot/aol/tests/test_hkg_early_long_withdrawal.py',
+  'openpilot/starpilot/aol/tests/test_hkg_angle_eps_retention.py',
+  'opendbc_repo/opendbc/car/hyundai/tests/test_angle_fault_recovery.py',
+  'opendbc_repo/opendbc/car/hyundai/tests/test_ccnc_long_validation.py',
+  'opendbc_repo/opendbc/car/hyundai/tests/test_daw.py',
+  'openpilot/starpilot/aol/tests/test_hkg_angle_limit_warning.py',
   'openpilot/starpilot/car/toyota/tests/test_prius_retrofit_stock.py',
   'openpilot/starpilot/car/toyota/tests/test_prius_retrofit_stock_callers.py',
   'opendbc_repo/opendbc/car/toyota/tests/test_matrix_filter.py',
@@ -511,6 +517,7 @@ RELEASE_TARGETS = (
   "opendbc_repo/opendbc/safety/tests/test_hyundai_ccnc_angle_two.py",
   "opendbc_repo/opendbc/safety/tests/test_hyundai_ioniq6_long.py",
   "opendbc_repo/opendbc/safety/tests/test_hyundai_ray_pedal.py",
+  "opendbc_repo/opendbc/safety/tests/test_hyundai_daw.py",
   "opendbc_repo/opendbc/safety/tests/test_honda_mvl_stock.py",
   "opendbc_repo/opendbc/safety/tests/test_honda_stock_aol.py",
   "opendbc_repo/opendbc/safety/tests/test_mazda_stock_aol.py",
@@ -526,6 +533,7 @@ RELEASE_TARGETS = (
   "opendbc_repo/opendbc/safety/tests/test_subaru_ascent_angle.py",
   "opendbc_repo/opendbc/safety/tests/test_ford_three.py",
   "opendbc_repo/opendbc/safety/tests/test_hyundai_canfd_carnival.py",
+  "opendbc_repo/opendbc/safety/tests/test_hyundai_carnival_long_aol.py",
   "opendbc_repo/opendbc/safety/tests/test_subaru_stock_aol.py",
   "opendbc_repo/opendbc/safety/tests/test_subaru_software_cruise.py",
   "opendbc_repo/opendbc/safety/tests/test_subaru_sng.py",

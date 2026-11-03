@@ -23,7 +23,8 @@ from openpilot.starpilot.car.subaru.tests.native_fixture import subaru_native_pa
 
 @pytest.mark.parametrize('candidate', [CAR.SUBARU_ASCENT_2023, CAR.SUBARU_LEGACY_2025, CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_FORESTER, CAR.SUBARU_OUTBACK])
 def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, subaru_native_pair, tmp_path, aol=True, manual=False, stop_resume=False,
-                                                                      hard_stop_native_first=False, main_only=False, preferences=None, firmware=None):
+                                                                      hard_stop_native_first=False, main_only=False, preferences=None, firmware=None,
+                                                                      deadline_gap=False, fixed_angle_handoff=False):
   fw = firmware_records(candidate, FW_VERSIONS, 'subaru') if firmware is None else firmware
   rows = []
   with actual_factory(candidate, gen_empty_fingerprint(), fw, '0' * 17, manual=manual, aol=aol, preferences=preferences) as (card, params, matches):
@@ -62,8 +63,9 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
       published = {}
       ticks = (list(range(125)) + list(range(125, 135)) * 30 + list(range(135, 460))
                if hard_stop_native_first else range(460))
+      gap_tick = 75 if main_only else 210
       for elapsed, tick in enumerate(ticks):
-        now = base + elapsed * 10_000_000
+        now = base + elapsed * 10_000_000 + (22_504_479 if deadline_gap and elapsed >= gap_tick else 0)
         cruise = not main_only and (30 <= tick < 110 or tick >= 410)
         brake = 90 <= tick < 110
         reverse = 150 <= tick < 185
@@ -72,9 +74,10 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
         stopped = stop_resume and (125 <= tick < 135 if hard_stop_native_first else 185 <= tick < 195)
         first_resume = 145 <= tick < 150 if hard_stop_native_first else 125 <= tick < 145
         values = {
-          'Steering_Torque': {'Steer_Warning': int(temporary)},
-          'Steering_2': {'Steering_Angle': 0},
-          'Wheel_Speeds': dict.fromkeys(('FL', 'FR', 'RL', 'RR'), 0 if stopped else 54),
+          'Steering_Torque': {'Steer_Warning': int(temporary),
+                             'Steer_Torque_Sensor': (250 if 70 <= tick < 76 else 143 if 76 <= tick < 90 else 0) if fixed_angle_handoff else 0},
+          'Steering_2': {'Steering_Angle': (5.65 if tick < 78 else 5.61) if fixed_angle_handoff else 0},
+          'Wheel_Speeds': dict.fromkeys(('FL', 'FR', 'RL', 'RR'), 0 if stopped else 121.5 if fixed_angle_handoff else 54),
           'Brake_Status': {'Brake': int(brake)},
           'CruiseControl': {'Cruise_On': int(main), 'Cruise_Activated': int(cruise)},
           'ES_Status': {'Cruise_Activated': int(cruise)},
@@ -142,7 +145,19 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
           _assert_hard_stop_fault_guards(card, cs, now + 2000)
         # Deliver each genuine10Hz native receipt once; do not refresh receive time/frequency from a cached snapshot.
         new_native = receipt if receipt is not None and (tick % 10 == 1 or hard_stop_receipt) else None
+        if deadline_gap and elapsed == gap_tick:
+          prior = driven['aolAxisState'].aolAxisState
+          assert prior.lateralActive and now + 2000 > prior.validUntilMonoTime
+          with patch('openpilot.selfdrive.controls.controlsd.time.monotonic_ns', return_value=now + 2000):
+            expired, _ = controls.state_control()
+          assert not expired.latActive and not expired.longActive
         driven_new = selfdrive_step(sd, published, new_native, previous_controls, cp, safety, now, calibration='calibrated')
+        if deadline_gap and elapsed == gap_tick:
+          current = driven_new['aolAxisState'].aolAxisState
+          assert current.lateralActive and not sd.aol_authority_lost, 'SUBARU_FRESH_SUCCESSOR_LOST_LATERAL'
+          assert current.validUntilMonoTime > prior.validUntilMonoTime
+          assert current.sourceCarStateMonoTime == published['carState'].logMonoTime
+          assert log.OnroadEvent.EventName.controlsMismatch not in sd.events.names
         driven.update(driven_new)
         order = None
         if aol and tick % 10 == 0:
@@ -188,11 +203,18 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
             output = decoder.vl[steering_name]['LKAS_Output']
             decoded_steering.append({'request': request, 'output': output, 'nativeAccepted': accepted})
             if not stopped and (65 <= tick < 90 or aol and (first_resume or 205 <= tick < 220 or 280 <= tick < 300)):
-              assert request and accepted, (tick, decoded_steering)
+              if fixed_angle_handoff and 72 <= tick < 78:
+                assert not request and accepted, (tick, decoded_steering)
+              else:
+                assert request, (tick, decoded_steering)
+                assert accepted, ('SUBARU_ANGLE_HANDOFF_NATIVE_REJECTED', tick, decoded_steering)
               if output != 0:
                 active_emissions.append(tick)
             if 165 <= tick < 180 or 240 <= tick < 255 or not aol and (125 <= tick < 145 or 205 <= tick < 220 or 280 <= tick < 300):
-              assert not request and output == 0, (tick, decoded_steering)
+              if fixed_angle_handoff:
+                assert not request and abs(output - cs.steeringAngleDeg) <= 0.011, (tick, decoded_steering)
+              else:
+                assert not request and output == 0, (tick, decoded_steering)
         intent = decode_intent(published['aolIntentWire'].aolIntentWire) if aol else None
         row = {
           'tick': tick,
@@ -332,3 +354,37 @@ def test_actual_main_without_set_retains_native_first_stop_intent(subaru_native_
   assert all(not row['controls'] and not row['enabled'] and not row['long'] for row in rows)
   assert all(row['lat'] and row['permission'] == 1 for row in rows if 65 <= row['tick'] < 90)
   assert all(not row['lat'] and row['cardLatch'] and row['permission'] == 0 for row in rows if 125 <= row['tick'] < 135)
+
+
+@pytest.mark.parametrize('candidate', [CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_OUTBACK_2023])
+def test_actual_fresh_subaru_source_after_expired_output(candidate, subaru_native_pair, tmp_path):
+  test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(
+    candidate, subaru_native_pair, tmp_path, main_only=True, deadline_gap=True)
+
+
+@pytest.mark.parametrize('event', [log.OnroadEvent.EventName.buttonCancel, log.OnroadEvent.EventName.pedalPressed])
+def test_actual_subaru_expired_output_keeps_user_disable(event, subaru_native_pair, tmp_path):
+  original = SelfdriveD._expire_axis_continuity
+
+  class ObservedVeto(Exception):
+    pass
+
+  def check(sd, state, now_ns):
+    proof = getattr(sd, 'aol_step_input_proof', None)
+    if proof is not None and now_ns > proof[3] and sd.aol_axis_decision.lateral_active:
+      sd.events.add(event)
+      assert original(sd, state, now_ns)
+      assert not sd.aol_axis_decision.lateral_active and not sd.aol_axis_decision.longitudinal_active
+      assert sd.aol_authority_lost and event in sd.events.names
+      raise ObservedVeto
+    return original(sd, state, now_ns)
+
+  with patch.object(SelfdriveD, '_expire_axis_continuity', check), pytest.raises(ObservedVeto):
+    test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(
+      CAR.SUBARU_IMPREZA_2020, subaru_native_pair, tmp_path, main_only=True, deadline_gap=True)
+
+
+@pytest.mark.parametrize('candidate', [CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_LEGACY_2025, CAR.SUBARU_ASCENT_2023])
+def test_actual_fixed_angle_driver_handoff_keeps_native_rate_limit(candidate, subaru_native_pair, tmp_path, preferences=None):
+  test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(
+    candidate, subaru_native_pair, tmp_path, preferences=preferences, fixed_angle_handoff=True)
