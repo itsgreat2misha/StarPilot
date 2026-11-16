@@ -62,9 +62,11 @@
 #   to the issue steps.
 #
 # NOTE — fork Dom branch:
-#   This workflow does NOT sync the fork's Dom branch. It merges upstream
-#   Dom directly into each target branch, so no push to Dom happens here
-#   and no upstream workflow is triggered by a Dom push.
+#   A separate job (sync-dom, added Nov 16, 2026) fast-forwards the fork's
+#   Dom branch to upstream Dom — fast-forward ONLY: if fork Dom has
+#   diverged, that job fails and pushes nothing for Dom. The GV70 sync
+#   jobs do not depend on it: they merge upstream Dom directly into each
+#   target branch, exactly as before.
 #
 # NOTE — Actions in this fork:
 #   Enabling Actions enables ALL workflows in the fork whose triggers
@@ -84,6 +86,47 @@ permissions:
   issues: write
 
 jobs:
+  sync-dom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@v4
+        with:
+          ref: StarPilot
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fast-forward fork Dom to upstream Dom
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git remote add upstream https://github.com/StarPilotHQ/StarPilot.git || true
+          git fetch --no-tags upstream "+refs/heads/Dom:refs/remotes/upstream/Dom"
+          git fetch --no-tags origin "+refs/heads/Dom:refs/remotes/origin/Dom"
+          OLD_DOM="$(git rev-parse origin/Dom)"
+          UPSTREAM_DOM="$(git rev-parse upstream/Dom)"
+          if [ "$OLD_DOM" = "$UPSTREAM_DOM" ]; then
+            {
+              echo "### Fork Dom already up to date"
+              echo "- Head: $OLD_DOM (unchanged)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Fast-forward ONLY: if fork Dom has diverged from upstream Dom,
+          # --ff-only fails, this job fails, and nothing is pushed for Dom.
+          git checkout -B Dom origin/Dom
+          git merge --ff-only upstream/Dom || {
+            echo "Fork Dom ($OLD_DOM) is not a fast-forward of upstream Dom ($UPSTREAM_DOM) — needs manual review, nothing pushed for Dom."
+            exit 1
+          }
+          git push origin Dom
+          {
+            echo "### Fork Dom fast-forwarded to upstream Dom"
+            echo "- Old head: $OLD_DOM"
+            echo "- New head: $UPSTREAM_DOM"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 30
