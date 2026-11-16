@@ -8,7 +8,10 @@
 # gv70-smooth, or gv70-experimental the default.
 #
 # Branches synced by this workflow (and ONLY these):
-#   - gv70-smooth       (SP-GAIN v1 + move-off calming + SysIndReq + damping 100)
+#   - gv70-smooth       (identical state to gv70-experimental since Nov 16, 2026:
+#                        approach-build + gated TurnAssist + crawl + friction +
+#                        broad calm + SysIndReq + damping 100, NO latAccelFactor
+#                        #3, NO SP-GAIN / numbing fixes)
 #   - gv70-experimental (approach-build + gated TurnAssist + crawl + friction +
 #                        broad calm + SysIndReq + damping 100, NO latAccelFactor
 #                        #3, NO SP-GAIN / numbing fixes)
@@ -264,7 +267,12 @@ jobs:
             echo "up_to_date=false" >> "$GITHUB_OUTPUT"
           fi
           echo "merged_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "files=$(git diff --name-only "$OLD_HEAD" HEAD | paste -sd ',' -)" >> "$GITHUB_OUTPUT"
+          # Name this merged_files, NOT files: in the conflict path the merge
+          # is aborted, HEAD == OLD_HEAD and this diff is empty, so writing it
+          # to the files output overwrote the conflicted-files list set above
+          # (last write to $GITHUB_OUTPUT wins) and the [sync-conflict] issue
+          # body came out with an empty file list (issues #7/#8, Nov 16, 2026).
+          echo "merged_files=$(git diff --name-only "$OLD_HEAD" HEAD | paste -sd ',' -)" >> "$GITHUB_OUTPUT"
 
       - name: Verify our files survived the merge
         id: verify
@@ -351,7 +359,7 @@ jobs:
           # or issue creation fails, this step (and the job) must fail
           # loudly instead of silently skipping the conflict report.
           if [ "$BRANCH" = "gv70-smooth" ]; then
-            INTENDED="SP-GAIN v1 + move-off calming + SysIndReq + damping 100"
+            INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
           else
             INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
           fi
@@ -391,7 +399,7 @@ jobs:
         run: |
           # No continue-on-error here on purpose (see conflict issue step).
           if [ "$BRANCH" = "gv70-smooth" ]; then
-            INTENDED="SP-GAIN v1 + move-off calming + SysIndReq + damping 100"
+            INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
           else
             INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
           fi
@@ -433,7 +441,7 @@ jobs:
               echo "- Old head: ${{ steps.merge.outputs.old_head }}"
               echo "- New head: ${{ steps.receipt.outputs.new_head }}"
               echo "- Upstream Dom head: ${{ steps.merge.outputs.upstream_head }}"
-              echo "- Files changed by merge: ${{ steps.merge.outputs.files }}"
+              echo "- Files changed by merge: ${{ steps.merge.outputs.merged_files }}"
               echo "- Receipt-only conflict auto-resolved: ${{ steps.merge.outputs.receipt_conflict_only }}"
               echo "- prebuilt.json receipt recomputed by workflow: ${{ steps.receipt.outputs.receipt_changed }} (digest self-validated against the previous head before the merge, and verified against the new tree after writing — the new head is Galaxy-safe as-is)"
             } >> "$GITHUB_STEP_SUMMARY"
