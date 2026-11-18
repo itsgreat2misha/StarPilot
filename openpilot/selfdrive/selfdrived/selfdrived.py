@@ -11,8 +11,9 @@ import openpilot.cereal.messaging as messaging
 
 from openpilot.cereal import log
 from opendbc.car.structs import car
+from opendbc.car.vehicle_model import VehicleModel
 from opendbc.car.hyundai.ev6_aol import qualified as ev6_aol_qualified
-from opendbc.car.hyundai.values import HyundaiFlags
+from opendbc.car.hyundai.values import CAR, HyundaiFlags
 from opendbc.car.honda.stock_aol import qualified as honda_aol_qualified, temporary_restriction as honda_temporary_restriction
 from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient
@@ -88,6 +89,9 @@ MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 HKG_ANGLE_LIMIT_WARNING_DEG = 176.0
 HKG_ANGLE_LIMIT_WARNING_NS = 200_000_000
+GV70_TORQUE_SATURATION_OUTPUT = 0.99
+GV70_TORQUE_SATURATION_ANGLE_ERROR_DEG = 8.0
+GV70_TORQUE_SATURATION_WARNING_NS = 1_000_000_000
 
 
 class SelfdriveD:
@@ -239,6 +243,11 @@ class SelfdriveD:
       self.CP.steerControlType == car.CarParams.SteerControlType.angle and
       self.CP.flags & HyundaiFlags.CANFD and self.CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING)
     self.hkg_angle_limit_since_ns = self.hkg_angle_limit_last_ns = 0
+    self.gv70_torque_steering = bool(self.CP.brand == 'hyundai' and not self.CP.notCar and
+      self.CP.carFingerprint == CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN and
+      self.CP.steerControlType == car.CarParams.SteerControlType.torque)
+    self.gv70_torque_saturation_since_ns = self.gv70_torque_saturation_last_ns = 0
+    self.gv70_vehicle_model = VehicleModel(self.CP) if self.gv70_torque_steering else None
     self.distance_traveled = 0
     self.last_functional_fan_frame = 0
     self.events_prev = []
@@ -334,6 +343,52 @@ class SelfdriveD:
       self.hkg_angle_limit_since_ns = now_ns
     self.hkg_angle_limit_last_ns = now_ns
     if (now_ns - self.hkg_angle_limit_since_ns >= HKG_ANGLE_LIMIT_WARNING_NS and
+        EventName.steerSaturated not in self.events.names):
+      self.events.add(EventName.steerSaturated)
+
+  def _update_gv70_torque_saturation_warning(self, CS):
+    # Torque-steering sibling of the HKG angle limit warning above. The stock
+    # steerSaturated path cannot fire for this car at stall speeds: the torque
+    # controller's saturation timer only accumulates above 10 m/s and the
+    # selfdrived undershoot check is gated on desired lateral acceleration,
+    # which collapses with v^2. So warn directly on the sustained stall
+    # signature instead: output pinned at the cap while the steering angle
+    # stays well short of the angle the desired curvature requires.
+    if not getattr(self, 'gv70_torque_steering', False):
+      return
+    now_ns = time.monotonic_ns()
+    control_ns = int(self.sm.logMonoTime['carControl'])
+    output_ns = int(self.sm.logMonoTime['carOutput'])
+    model_ns = int(self.sm.logMonoTime['modelV2'])
+    source_ns = self.aol_car_state_log_ns
+    command = self.sm['carControl']
+    torque = self.sm['carOutput'].actuatorsOutput.torque
+    desired_curvature = self.sm['modelV2'].action.desiredCurvature
+    vm = getattr(self, 'gv70_vehicle_model', None)
+    angle_error = None
+    if vm is not None and math.isfinite(desired_curvature) and math.isfinite(CS.vEgo) and math.isfinite(CS.steeringAngleDeg):
+      desired_angle = math.degrees(vm.get_steer_from_curvature(-desired_curvature, CS.vEgo, 0.0))
+      if math.isfinite(desired_angle):
+        angle_error = abs(desired_angle - CS.steeringAngleDeg)
+    over_limit = bool(self.conditional_car_state_valid and CS.canValid and not CS.canTimeout and
+      not CS.steeringPressed and not CS.steerFaultTemporary and not CS.steerFaultPermanent and
+      self.sm.seen['carControl'] and self.sm.valid['carControl'] and self.sm.alive['carControl'] and
+      self.sm.seen['carOutput'] and self.sm.valid['carOutput'] and self.sm.alive['carOutput'] and
+      self.sm.seen['modelV2'] and self.sm.valid['modelV2'] and self.sm.alive['modelV2'] and
+      0 < control_ns <= now_ns and now_ns - control_ns <= INTENT_MAX_AGE_NS and
+      0 < output_ns <= now_ns and now_ns - output_ns <= INTENT_MAX_AGE_NS and
+      0 < model_ns <= now_ns and now_ns - model_ns <= INTENT_MAX_AGE_NS and
+      0 < source_ns <= now_ns and now_ns - source_ns <= INTENT_MAX_AGE_NS and
+      command.latActive and math.isfinite(torque) and abs(torque) >= GV70_TORQUE_SATURATION_OUTPUT and
+      angle_error is not None and angle_error > GV70_TORQUE_SATURATION_ANGLE_ERROR_DEG)
+    if not over_limit:
+      self.gv70_torque_saturation_since_ns = self.gv70_torque_saturation_last_ns = 0
+      return
+    if (not self.gv70_torque_saturation_since_ns or now_ns < self.gv70_torque_saturation_last_ns or
+        now_ns - self.gv70_torque_saturation_last_ns > INTENT_MAX_AGE_NS):
+      self.gv70_torque_saturation_since_ns = now_ns
+    self.gv70_torque_saturation_last_ns = now_ns
+    if (now_ns - self.gv70_torque_saturation_since_ns >= GV70_TORQUE_SATURATION_WARNING_NS and
         EventName.steerSaturated not in self.events.names):
       self.events.add(EventName.steerSaturated)
 
@@ -730,6 +785,7 @@ class SelfdriveD:
         self.events.add(EventName.steerSaturated)
 
     self._update_hkg_angle_limit_warning(CS)
+    self._update_gv70_torque_saturation_warning(CS)
 
     # Check for FCW
     stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
@@ -1282,7 +1338,8 @@ class SelfdriveD:
       self.AM.alerts.pop('aolAvailability/warning', None)
     if getattr(self, 'jetlink_link_lost', False):
       alerts.append(jetlink_lost_alert())
-    if (self.CP.brand == 'ford' or getattr(self, 'hkg_angle_steering', False)) and CS.steeringPressed:
+    if (self.CP.brand == 'ford' or getattr(self, 'hkg_angle_steering', False) or
+        getattr(self, 'gv70_torque_steering', False)) and CS.steeringPressed:
       # Saturation is already ignored during override; retire its held presentation too.
       alerts = [alert for alert in alerts if alert.alert_type != 'steerSaturated/warning']
       self.AM.alerts.pop('steerSaturated/warning', None)
@@ -2374,7 +2431,8 @@ class SelfdriveD:
         (self.enabled or intent is not None and intent.allowedLatch) and
         ET.WARNING not in self.state_machine.current_alert_types):
       self.state_machine.current_alert_types.append(ET.WARNING)
-    if (getattr(self, 'hkg_angle_steering', False) and self.aol_axis_decision.lateral_active and
+    if ((getattr(self, 'hkg_angle_steering', False) or getattr(self, 'gv70_torque_steering', False)) and
+        self.aol_axis_decision.lateral_active and
         EventName.steerSaturated in self.events.names and ET.WARNING not in self.state_machine.current_alert_types):
       self.state_machine.current_alert_types.append(ET.WARNING)
     axis_published = bool(not REPLAY and self.aol_replay and self.axis_transport_required)
