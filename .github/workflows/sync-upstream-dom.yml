@@ -1,5 +1,6 @@
-# Sync upstream Dom into gv70-smooth and gv70-experimental, without
-# silently overwriting the GV70 changes on either branch.
+# Sync upstream Dom into gv70-smooth, gv70-experimental and
+# gv70-upstream-pr, without silently overwriting the GV70 changes on
+# any of them.
 #
 # Place this file at: .github/workflows/sync-upstream-dom.yml  on the fork's
 # DEFAULT branch (StarPilot). Scheduled workflows only run from the default
@@ -9,12 +10,21 @@
 #
 # Branches synced by this workflow (and ONLY these):
 #   - gv70-smooth       (identical state to gv70-experimental since Nov 16, 2026:
-#                        approach-build + gated TurnAssist + crawl + friction +
-#                        broad calm + SysIndReq + damping 100, NO latAccelFactor
-#                        #3, NO SP-GAIN / numbing fixes)
-#   - gv70-experimental (approach-build + gated TurnAssist + crawl + friction +
-#                        broad calm + SysIndReq + damping 100, NO latAccelFactor
-#                        #3, NO SP-GAIN / numbing fixes)
+#                        approach-build + high-speed preview + TurnAssist with
+#                        the turn lead REMOVED + crawl + friction + broad calm
+#                        + SysIndReq + damping 100, NO latAccelFactor #3,
+#                        NO SP-GAIN / numbing fixes)
+#   - gv70-experimental (approach-build + high-speed preview + TurnAssist with
+#                        the turn lead REMOVED + crawl + friction + broad calm
+#                        + SysIndReq + damping 100, NO latAccelFactor #3,
+#                        NO SP-GAIN / numbing fixes)
+#   - gv70-upstream-pr  (the upstream PR branch: low-speed calm + crawl +
+#                        friction turn-in helpers + ModelTurnAssist enabled
+#                        with the turn lead REMOVED; NO approach-build, NO
+#                        high-speed preview, NO turn lead)
+# Each branch's intended state is encoded per branch in the sync matrix
+# (intended text + state_profile) and checked after every merge by the
+# "Verify branch intended state" step; a mismatch pushes NOTHING.
 # Deleted Nov 1, 2026 and NOT synced here: gv70-low-speed-tune, gv70-field-sweep.
 #
 # DESIGN (revised Nov 3, 2026 — this replaces the old "never touch
@@ -37,11 +47,19 @@
 #      open/dedupe a [sync-conflict] issue, fail the job. Resolve by hand.
 #   4. OUR_FILES gate (the real protection): the files carrying our
 #      changes are listed in OUR_FILES below. Before the merge, the
-#      workflow records which of them differ from upstream Dom on this
-#      branch. After the merge, any of those files whose diff vs upstream
-#      is GONE (or which is missing) means our work was silently undone
-#      by a clean merge: push NOTHING, open/dedupe a [sync-conflict]
-#      issue saying changes were LOST, fail the job.
+#      workflow computes the merge base of the branch head and the
+#      upstream head and records the AT-RISK set: the OUR_FILES the
+#      BRANCH changed relative to that base. After the merge, an
+#      at-risk file counts as LOST only if the merged result no longer
+#      contains the branch's changes (merged blob identical to the
+#      upstream blob while the branch blob differed from it): push
+#      NOTHING, open/dedupe a [sync-conflict] issue saying changes
+#      were LOST, fail the job. (Fixed Nov 18, 2026: the old check
+#      compared branch files against the CURRENT upstream head, so a
+#      file upstream itself had rewritten since the branch's base —
+#      and the branch had never touched — looked "lost" when the
+#      merge correctly took upstream's version. That false alarm
+#      stopped both GV70 syncs on Nov 17, 2026; issues #9/#10.)
 #   5. If upstream CHANGED any OUR_FILES file and the merge kept our diff
 #      intact, the merge pushes as normal, but the job summary carries a
 #      prominent "Upstream changed files we experiment with" section so
@@ -136,7 +154,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: [gv70-smooth, gv70-experimental]
+        include:
+          - branch: gv70-smooth
+            state_profile: gv70-full
+            intended: "approach-build + high-speed preview + TurnAssist with the turn lead REMOVED + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
+          - branch: gv70-experimental
+            state_profile: gv70-full
+            intended: "approach-build + high-speed preview + TurnAssist with the turn lead REMOVED + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
+          - branch: gv70-upstream-pr
+            state_profile: gv70-pr
+            intended: "low-speed calm + crawl/friction turn-in helpers + ModelTurnAssist enabled with the turn lead REMOVED, NO approach-build, NO high-speed preview, NO turn lead"
     # One run at a time per branch; a run for one branch never cancels
     # or blocks the other branch's run.
     concurrency:
@@ -174,6 +201,76 @@ jobs:
             git fetch --no-tags upstream "+refs/heads/Dom:refs/remotes/upstream/Dom"
             git fetch --no-tags origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
           fi
+
+      - name: Load per-branch intended-state config
+        if: steps.check.outputs.skip != 'true'
+        env:
+          STATE_PROFILE: ${{ matrix.state_profile }}
+        run: |
+          # Per-branch expected/forbidden markers (path<TAB>fixed string),
+          # checked against the merged tree by the "Verify branch
+          # intended state" step below. A branch is only ever checked
+          # against its OWN intended state.
+          POLICY="openpilot/starpilot/lateral/genesis_gv70_policy.py"
+          MTA="openpilot/starpilot/lateral/model_turn_assist.py"
+          CSEL="openpilot/starpilot/lateral/controller_selection.py"
+          CSD="openpilot/selfdrive/controls/controlsd.py"
+          CANFD="opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py"
+          IFACE="opendbc_repo/opendbc/car/hyundai/interface.py"
+          : > /tmp/expected_markers.tsv
+          : > /tmp/forbidden_markers.tsv
+          exp_marker() { printf '%s\t%s\n' "$1" "$2" >> /tmp/expected_markers.tsv; }
+          forb_marker() { printf '%s\t%s\n' "$1" "$2" >> /tmp/forbidden_markers.tsv; }
+          # Markers shared by every GV70 branch: the calm + crawl/friction
+          # helpers, ModelTurnAssist enabled for the GV70, no SP-GAIN,
+          # no latAccelFactor multiplier in the policy.
+          exp_marker "$POLICY" 'GV70_CALM_'
+          exp_marker "$POLICY" 'get_gv70_crawl_turn_in_ff_scale'
+          exp_marker "$POLICY" 'get_gv70_turn_in_threshold_scale'
+          exp_marker "$POLICY" 'get_gv70_turn_in_friction_scale'
+          exp_marker "$CSEL" "policy_for(CP) in ('ioniq6', 'genesis_gv70_electrified')"
+          forb_marker "$POLICY" '_sp_gain'
+          forb_marker "$POLICY" 'latAccelFactor'
+          forb_marker "$MTA" '_gv70_gate_lead'
+          forb_marker "$CSEL" '_gv70_gate_lead'
+          case "$STATE_PROFILE" in
+            gv70-full)
+              # smooth / experimental: approach-build and the high-speed
+              # preview are PRESENT; the turn lead is REMOVED (the
+              # controller_selection predicate excludes the GV70);
+              # SysIndReq and damping 100 are part of the state.
+              exp_marker "$POLICY" 'approach_curv_hist'
+              exp_marker "$MTA" '_gv70_preview'
+              exp_marker "$CSEL" 'model_turn_assist_gv70_high_speed_preview'
+              exp_marker "$CSEL" "policy_for(CP) != 'genesis_gv70_electrified'"
+              exp_marker "$CANFD" '"LKA_SysIndReq": 2 if enabled else 1'
+              exp_marker "$IFACE" 'CANFD_LKAS_DAMPING_100'
+              forb_marker "$MTA" 'GV70_LEAD_'
+              ;;
+            gv70-pr)
+              # upstream PR branch: approach-build, the high-speed
+              # preview and the turn lead are all ABSENT; ModelTurnAssist
+              # is enabled through the features entry point with
+              # turn_lead off for the GV70.
+              exp_marker "$CSEL" 'model_turn_assist_features'
+              exp_marker "$CSEL" 'turn_lead=supported and not gv70'
+              forb_marker "$POLICY" 'GV70_APPROACH'
+              forb_marker "$POLICY" 'approach_curv_hist'
+              forb_marker "$POLICY" 'approach_boost'
+              forb_marker "$MTA" 'GV70_PREVIEW'
+              forb_marker "$MTA" '_gv70_preview'
+              forb_marker "$MTA" 'GV70_LEAD_'
+              forb_marker "$CSEL" 'high_speed_preview'
+              forb_marker "$CSD" 'high_speed_preview'
+              ;;
+            *)
+              echo "Unknown state_profile: $STATE_PROFILE"
+              exit 1
+              ;;
+          esac
+          echo "Loaded intended-state config for profile $STATE_PROFILE:"
+          echo "--- expected ---"; cat /tmp/expected_markers.tsv
+          echo "--- forbidden ---"; cat /tmp/forbidden_markers.tsv
 
       - name: Merge upstream Dom into branch
         id: merge
@@ -221,15 +318,24 @@ jobs:
               sys.exit(1)
           print('receipt method validated against current head')
           PYEOF
-          # Which of OUR_FILES differ from upstream before this merge?
-          # Those diffs are our work; losing one in the merge is a stop.
-          : > /tmp/our_pre_diff.txt
+          # At-risk set for the survival gate: the OUR_FILES the BRANCH
+          # changed relative to the MERGE BASE of the branch head and
+          # the upstream head. (The pre-Nov-18 check compared against
+          # the current upstream head instead, so any file upstream
+          # itself had rewritten since the base — and the branch had
+          # never touched — was flagged as "lost" when the merge
+          # correctly took upstream's version; issues #9/#10.)
+          MERGE_BASE="$(git merge-base "$OLD_HEAD" "$UPSTREAM_HEAD")"
+          echo "merge_base=$MERGE_BASE" >> "$GITHUB_OUTPUT"
+          : > /tmp/our_at_risk.txt
           while IFS= read -r f; do
-            if [ ! -f "$f" ] || [ -n "$(git diff upstream/Dom -- "$f")" ]; then
-              echo "$f" >> /tmp/our_pre_diff.txt
+            base_blob="$(git rev-parse -q --verify "$MERGE_BASE:$f" 2>/dev/null || true)"
+            branch_blob="$(git rev-parse -q --verify "$OLD_HEAD:$f" 2>/dev/null || true)"
+            if [ "$base_blob" != "$branch_blob" ]; then
+              echo "$f" >> /tmp/our_at_risk.txt
             fi
           done < /tmp/our_files.txt
-          echo "pre_diff_files=$(paste -sd ',' /tmp/our_pre_diff.txt)" >> "$GITHUB_OUTPUT"
+          echo "at_risk_files=$(paste -sd ',' /tmp/our_at_risk.txt)" >> "$GITHUB_OUTPUT"
           if git merge --no-edit upstream/Dom; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
             echo "receipt_conflict_only=false" >> "$GITHUB_OUTPUT"
@@ -279,12 +385,19 @@ jobs:
         if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true'
         run: |
           OLD_HEAD="${{ steps.merge.outputs.old_head }}"
+          UPSTREAM_HEAD="${{ steps.merge.outputs.upstream_head }}"
+          # An at-risk file is LOST only if the merged result no longer
+          # contains the branch's changes: merged blob identical to the
+          # upstream blob while the branch blob differed from it.
           : > /tmp/our_lost.txt
           while IFS= read -r f; do
-            if [ ! -f "$f" ] || [ -z "$(git diff upstream/Dom -- "$f")" ]; then
+            branch_blob="$(git rev-parse -q --verify "$OLD_HEAD:$f" 2>/dev/null || true)"
+            upstream_blob="$(git rev-parse -q --verify "$UPSTREAM_HEAD:$f" 2>/dev/null || true)"
+            merged_blob="$(git rev-parse -q --verify "HEAD:$f" 2>/dev/null || true)"
+            if [ "$merged_blob" = "$upstream_blob" ] && [ "$branch_blob" != "$upstream_blob" ]; then
               echo "$f" >> /tmp/our_lost.txt
             fi
-          done < /tmp/our_pre_diff.txt
+          done < /tmp/our_at_risk.txt
           if [ -s /tmp/our_lost.txt ]; then
             echo "lost=true" >> "$GITHUB_OUTPUT"
           else
@@ -301,9 +414,46 @@ jobs:
           done < /tmp/our_files.txt
           echo "touched_files=$(paste -sd ',' /tmp/our_touched.txt)" >> "$GITHUB_OUTPUT"
 
+      - name: Verify branch intended state
+        id: state
+        if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true'
+        run: |
+          # Check the merged tree against THIS branch's intended state
+          # (markers loaded by the "Load per-branch intended-state
+          # config" step). A mismatch pushes NOTHING and fails the job
+          # via the final step; this step itself only records the result.
+          BRANCH="${{ matrix.branch }}"
+          : > /tmp/state_mismatches.txt
+          while IFS=$'\t' read -r f marker; do
+            [ -z "$f" ] && continue
+            if [ ! -f "$f" ] || ! grep -Fq -- "$marker" "$f"; then
+              echo "MISSING $f :: $marker" >> /tmp/state_mismatches.txt
+            fi
+          done < /tmp/expected_markers.tsv
+          while IFS=$'\t' read -r f marker; do
+            [ -z "$f" ] && continue
+            if [ -f "$f" ] && grep -Fq -- "$marker" "$f"; then
+              echo "FORBIDDEN $f :: $marker" >> /tmp/state_mismatches.txt
+            fi
+          done < /tmp/forbidden_markers.tsv
+          if [ -s /tmp/state_mismatches.txt ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Intended-state mismatch: $BRANCH"
+              echo "The merged tree does not match this branch's intended state (${{ matrix.intended }}):"
+              echo '```'
+              cat /tmp/state_mismatches.txt
+              echo '```'
+              echo "Nothing was pushed for this branch."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "mismatches=$(paste -sd ';' /tmp/state_mismatches.txt)" >> "$GITHUB_OUTPUT"
+
       - name: Recompute prebuilt.json receipt for the merged tree
         id: receipt
-        if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true'
+        if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true' && steps.state.outputs.ok == 'true'
         run: |
           # After any merge that changed protected files, the inherited
           # prebuilt.json no longer matches the tree. Recompute it from
@@ -358,11 +508,7 @@ jobs:
           # No continue-on-error here on purpose: if Issues are disabled
           # or issue creation fails, this step (and the job) must fail
           # loudly instead of silently skipping the conflict report.
-          if [ "$BRANCH" = "gv70-smooth" ]; then
-            INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
-          else
-            INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
-          fi
+          INTENDED="${{ matrix.intended }}"
           DATE="$(date -u +%F)"
           TITLE="[sync-conflict] $BRANCH — upstream Dom merge conflict $DATE"
           BODY="Daily upstream sync stopped: merging StarPilotHQ/StarPilot Dom into $BRANCH conflicted, so NOTHING was pushed for this branch and the comma is unchanged.
@@ -398,14 +544,10 @@ jobs:
           LOST_FILES: ${{ steps.verify.outputs.lost_files }}
         run: |
           # No continue-on-error here on purpose (see conflict issue step).
-          if [ "$BRANCH" = "gv70-smooth" ]; then
-            INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
-          else
-            INTENDED="approach-build + gated TurnAssist + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
-          fi
+          INTENDED="${{ matrix.intended }}"
           DATE="$(date -u +%F)"
           TITLE="[sync-conflict] $BRANCH — branch changes LOST in clean upstream merge $DATE"
-          BODY="Daily upstream sync merged cleanly into $BRANCH, but our changes were LOST in the merge: the files below differed from upstream Dom before the merge and no longer do afterwards (or are missing), so NOTHING was pushed for this branch and the comma is unchanged.
+          BODY="Daily upstream sync merged cleanly into $BRANCH, but our changes were LOST in the merge: the files below were changed on this branch relative to the merge base, and the merged result no longer contains the branch's changes, so NOTHING was pushed for this branch and the comma is unchanged.
 
           - Branch: $BRANCH
           - Upstream Dom commit attempted: $UPSTREAM_HEAD
@@ -424,7 +566,7 @@ jobs:
           fi
 
       - name: Push merged branch and write summary
-        if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true'
+        if: steps.check.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true' && steps.verify.outputs.lost != 'true' && steps.state.outputs.ok == 'true'
         run: |
           BRANCH="${{ matrix.branch }}"
           if [ "${{ steps.merge.outputs.up_to_date }}" = "true" ]; then
@@ -457,9 +599,10 @@ jobs:
             fi
           fi
 
-      - name: Fail job if sync did not push (conflict or lost changes)
-        if: steps.check.outputs.skip != 'true' && (steps.merge.outputs.conflict == 'true' || steps.verify.outputs.lost == 'true')
+      - name: Fail job if sync did not push (conflict, lost changes or state mismatch)
+        if: steps.check.outputs.skip != 'true' && (steps.merge.outputs.conflict == 'true' || steps.verify.outputs.lost == 'true' || steps.state.outputs.ok == 'false')
         run: |
-          echo "Sync did not push for ${{ matrix.branch }}: conflict=${{ steps.merge.outputs.conflict }}, lost=${{ steps.verify.outputs.lost }}"
+          echo "Sync did not push for ${{ matrix.branch }}: conflict=${{ steps.merge.outputs.conflict }}, lost=${{ steps.verify.outputs.lost }}, state_ok=${{ steps.state.outputs.ok }}"
+          echo "State mismatches: ${{ steps.state.outputs.mismatches }}"
           echo "See the GitHub issue and job summary. Branch unchanged."
           exit 1
