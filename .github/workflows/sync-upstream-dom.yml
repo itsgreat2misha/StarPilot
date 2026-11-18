@@ -13,9 +13,10 @@
 #                        low-speed calm + crawl + friction turn-in helpers +
 #                        ModelTurnAssist enabled with the turn lead REMOVED +
 #                        ADRV heartbeat at first frame with the template
-#                        harvested during the ADAS disable; NO approach-build,
-#                        NO high-speed preview, NO turn lead, NO
-#                        latAccelFactor #3, NO SP-GAIN)
+#                        harvested during the ADAS disable; PLUS the GV70
+#                        torque saturation warning in selfdrived; NO
+#                        approach-build, NO high-speed preview, NO turn
+#                        lead, NO latAccelFactor #3, NO SP-GAIN)
 #   - gv70-upstream-pr  (the upstream PR branch: low-speed calm + crawl +
 #                        friction turn-in helpers + ModelTurnAssist enabled
 #                        with the turn lead REMOVED; NO approach-build, NO
@@ -156,7 +157,7 @@ jobs:
         include:
           - branch: gv70-experimental
             state_profile: gv70-exp
-            intended: "low-speed calm + crawl/friction turn-in helpers + ModelTurnAssist enabled with the turn lead REMOVED + alpha-long ADRV startup sequencing fix (ADRV heartbeat at first frame, template harvested during the ADAS disable), NO approach-build, NO high-speed preview, NO turn lead, NO SP-GAIN"
+            intended: "low-speed calm + crawl/friction turn-in helpers + ModelTurnAssist enabled with the turn lead REMOVED + alpha-long ADRV startup sequencing fix (ADRV heartbeat at first frame, template harvested during the ADAS disable) + GV70 torque saturation warning in selfdrived (experimental only), NO approach-build, NO high-speed preview, NO turn lead, NO SP-GAIN"
           - branch: gv70-upstream-pr
             state_profile: gv70-pr
             intended: "low-speed calm + crawl/friction turn-in helpers + ModelTurnAssist enabled with the turn lead REMOVED, NO approach-build, NO high-speed preview, NO turn lead"
@@ -213,6 +214,7 @@ jobs:
           CSD="openpilot/selfdrive/controls/controlsd.py"
           CANFD="opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py"
           STARTUP="opendbc_repo/opendbc/car/hyundai/gv70_startup.py"
+          SD="openpilot/selfdrive/selfdrived/selfdrived.py"
           IFACE="opendbc_repo/opendbc/car/hyundai/interface.py"
           : > /tmp/expected_markers.tsv
           : > /tmp/forbidden_markers.tsv
@@ -239,11 +241,14 @@ jobs:
               # startup sequencing fix in gv70_startup.py: prepare
               # harvests the ADRV 0x51 template during the ADAS disable
               # instead of gating on a pre-disable capture, and configure
-              # keeps the None-template empty-0x51 continuation.
+              # keeps the None-template empty-0x51 continuation. PLUS
+              # the GV70 torque saturation warning in selfdrived
+              # (experimental only; the PR branch does not carry it).
               exp_marker "$CSEL" 'model_turn_assist_features'
               exp_marker "$CSEL" 'turn_lead=supported and not gv70'
               exp_marker "$STARTUP" 'def _harvest(self, packet)'
               exp_marker "$STARTUP" 'ci.CC.adrv_template = None'
+              exp_marker "$SD" '_update_gv70_torque_saturation_warning'
               forb_marker "$POLICY" 'GV70_APPROACH'
               forb_marker "$POLICY" 'approach_curv_hist'
               forb_marker "$POLICY" 'approach_boost'
@@ -291,7 +296,8 @@ jobs:
           openpilot/selfdrive/controls/controlsd.py
           opendbc_repo/opendbc/car/hyundai/carcontroller.py
           opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py
-          opendbc_repo/opendbc/car/hyundai/gv70_startup.py"
+          opendbc_repo/opendbc/car/hyundai/gv70_startup.py
+          openpilot/selfdrive/selfdrived/selfdrived.py"
           echo "$OUR_FILES" > /tmp/our_files.txt
           git checkout "$BRANCH"
           OLD_HEAD="$(git rev-parse HEAD)"
