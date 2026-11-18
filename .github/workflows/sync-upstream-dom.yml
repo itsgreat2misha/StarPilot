@@ -1,23 +1,21 @@
-# Sync upstream Dom into gv70-smooth, gv70-experimental and
-# gv70-upstream-pr, without silently overwriting the GV70 changes on
-# any of them.
+# Sync upstream Dom into gv70-experimental and gv70-upstream-pr,
+# without silently overwriting the GV70 changes on either of them.
 #
 # Place this file at: .github/workflows/sync-upstream-dom.yml  on the fork's
 # DEFAULT branch (StarPilot). Scheduled workflows only run from the default
-# branch, so a copy on gv70-smooth or gv70-experimental alone will NOT run
-# on schedule. Keep StarPilot as the default branch. Do NOT make Dom,
-# gv70-smooth, or gv70-experimental the default.
+# branch, so a copy on gv70-experimental or gv70-upstream-pr alone will
+# NOT run on schedule. Keep StarPilot as the default branch. Do NOT make
+# Dom or gv70-experimental the default.
 #
 # Branches synced by this workflow (and ONLY these):
-#   - gv70-smooth       (identical state to gv70-experimental since Nov 16, 2026:
-#                        approach-build + high-speed preview + TurnAssist with
-#                        the turn lead REMOVED + crawl + friction + broad calm
-#                        + SysIndReq + damping 100, NO latAccelFactor #3,
-#                        NO SP-GAIN / numbing fixes)
-#   - gv70-experimental (approach-build + high-speed preview + TurnAssist with
-#                        the turn lead REMOVED + crawl + friction + broad calm
-#                        + SysIndReq + damping 100, NO latAccelFactor #3,
-#                        NO SP-GAIN / numbing fixes)
+#   - gv70-experimental (rebuilt Nov 18, 2026: the gv70-upstream-pr content
+#                        PLUS the alpha-long ADRV startup sequencing fix —
+#                        low-speed calm + crawl + friction turn-in helpers +
+#                        ModelTurnAssist enabled with the turn lead REMOVED +
+#                        ADRV heartbeat at first frame with the template
+#                        harvested during the ADAS disable; NO approach-build,
+#                        NO high-speed preview, NO turn lead, NO
+#                        latAccelFactor #3, NO SP-GAIN)
 #   - gv70-upstream-pr  (the upstream PR branch: low-speed calm + crawl +
 #                        friction turn-in helpers + ModelTurnAssist enabled
 #                        with the turn lead REMOVED; NO approach-build, NO
@@ -26,6 +24,7 @@
 # (intended text + state_profile) and checked after every merge by the
 # "Verify branch intended state" step; a mismatch pushes NOTHING.
 # Deleted Nov 1, 2026 and NOT synced here: gv70-low-speed-tune, gv70-field-sweep.
+# gv70-smooth was deleted Nov 18, 2026 and is NOT synced here.
 #
 # DESIGN (revised Nov 3, 2026 — this replaces the old "never touch
 # prebuilt.json" doctrine):
@@ -155,12 +154,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - branch: gv70-smooth
-            state_profile: gv70-full
-            intended: "approach-build + high-speed preview + TurnAssist with the turn lead REMOVED + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
           - branch: gv70-experimental
-            state_profile: gv70-full
-            intended: "approach-build + high-speed preview + TurnAssist with the turn lead REMOVED + crawl + friction + broad calm + SysIndReq + damping 100, NO latAccelFactor #3, NO SP-GAIN"
+            state_profile: gv70-exp
+            intended: "low-speed calm + crawl/friction turn-in helpers + ModelTurnAssist enabled with the turn lead REMOVED + alpha-long ADRV startup sequencing fix (ADRV heartbeat at first frame, template harvested during the ADAS disable), NO approach-build, NO high-speed preview, NO turn lead, NO SP-GAIN"
           - branch: gv70-upstream-pr
             state_profile: gv70-pr
             intended: "low-speed calm + crawl/friction turn-in helpers + ModelTurnAssist enabled with the turn lead REMOVED, NO approach-build, NO high-speed preview, NO turn lead"
@@ -216,6 +212,7 @@ jobs:
           CSEL="openpilot/starpilot/lateral/controller_selection.py"
           CSD="openpilot/selfdrive/controls/controlsd.py"
           CANFD="opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py"
+          STARTUP="opendbc_repo/opendbc/car/hyundai/gv70_startup.py"
           IFACE="opendbc_repo/opendbc/car/hyundai/interface.py"
           : > /tmp/expected_markers.tsv
           : > /tmp/forbidden_markers.tsv
@@ -234,18 +231,27 @@ jobs:
           forb_marker "$MTA" '_gv70_gate_lead'
           forb_marker "$CSEL" '_gv70_gate_lead'
           case "$STATE_PROFILE" in
-            gv70-full)
-              # smooth / experimental: approach-build and the high-speed
-              # preview are PRESENT; the turn lead is REMOVED (the
-              # controller_selection predicate excludes the GV70);
-              # SysIndReq and damping 100 are part of the state.
-              exp_marker "$POLICY" 'approach_curv_hist'
-              exp_marker "$MTA" '_gv70_preview'
-              exp_marker "$CSEL" 'model_turn_assist_gv70_high_speed_preview'
-              exp_marker "$CSEL" "policy_for(CP) != 'genesis_gv70_electrified'"
-              exp_marker "$CANFD" '"LKA_SysIndReq": 2 if enabled else 1'
-              exp_marker "$IFACE" 'CANFD_LKAS_DAMPING_100'
+            gv70-exp)
+              # gv70-experimental: the gv70-pr state (approach-build, the
+              # high-speed preview and the turn lead all ABSENT;
+              # ModelTurnAssist enabled through the features entry point
+              # with turn_lead off for the GV70) PLUS the alpha-long ADRV
+              # startup sequencing fix in gv70_startup.py: prepare
+              # harvests the ADRV 0x51 template during the ADAS disable
+              # instead of gating on a pre-disable capture, and configure
+              # keeps the None-template empty-0x51 continuation.
+              exp_marker "$CSEL" 'model_turn_assist_features'
+              exp_marker "$CSEL" 'turn_lead=supported and not gv70'
+              exp_marker "$STARTUP" 'def _harvest(self, packet)'
+              exp_marker "$STARTUP" 'ci.CC.adrv_template = None'
+              forb_marker "$POLICY" 'GV70_APPROACH'
+              forb_marker "$POLICY" 'approach_curv_hist'
+              forb_marker "$POLICY" 'approach_boost'
+              forb_marker "$MTA" 'GV70_PREVIEW'
+              forb_marker "$MTA" '_gv70_preview'
               forb_marker "$MTA" 'GV70_LEAD_'
+              forb_marker "$CSEL" 'high_speed_preview'
+              forb_marker "$CSD" 'high_speed_preview'
               ;;
             gv70-pr)
               # upstream PR branch: approach-build, the high-speed
@@ -284,7 +290,8 @@ jobs:
           openpilot/starpilot/lateral/controller_selection.py
           openpilot/selfdrive/controls/controlsd.py
           opendbc_repo/opendbc/car/hyundai/carcontroller.py
-          opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py"
+          opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py
+          opendbc_repo/opendbc/car/hyundai/gv70_startup.py"
           echo "$OUR_FILES" > /tmp/our_files.txt
           git checkout "$BRANCH"
           OLD_HEAD="$(git rev-parse HEAD)"
