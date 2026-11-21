@@ -1,11 +1,11 @@
-# Sync upstream Dom into gv70-experimental and gv70-upstream-pr,
+# Sync upstream testing into gv70-experimental and gv70-upstream-pr,
 # without silently overwriting the GV70 changes on either of them.
 #
 # Place this file at: .github/workflows/sync-upstream-dom.yml  on the fork's
 # DEFAULT branch (StarPilot). Scheduled workflows only run from the default
 # branch, so a copy on gv70-experimental or gv70-upstream-pr alone will
 # NOT run on schedule. Keep StarPilot as the default branch. Do NOT make
-# Dom or gv70-experimental the default.
+# testing or gv70-experimental the default.
 #
 # Branches synced by this workflow (and ONLY these):
 #   - gv70-experimental (rebuilt Nov 18, 2026: the gv70-upstream-pr content
@@ -41,7 +41,7 @@
 #      receipt that matches its own tree (verified again after writing).
 #   2. A merge that conflicts ONLY on prebuilt.json is auto-resolved
 #      (finish the merge, then recompute the receipt as above) — upstream
-#      changes the receipt on essentially every Dom advance, so treating
+#      changes the receipt on essentially every testing advance, so treating
 #      it as a conflict made a successful run impossible by design.
 #   3. A merge that conflicts on ANY other file: abort, push NOTHING,
 #      open/dedupe a [sync-conflict] issue, fail the job. Resolve by hand.
@@ -71,7 +71,7 @@
 #      instead of running to the 360-minute platform default.
 #   8. Checkout is deliberately light: fetch-depth 1 for the default
 #      branch (only a carrier for this file), then targeted full-depth
-#      fetches of ONLY the matrix branch and upstream Dom. The old
+#      fetches of ONLY the matrix branch and upstream testing. The old
 #      full-clone checkout repeatedly hung for hours on this repo;
 #      nothing else in the job needs any other ref.
 #
@@ -82,12 +82,16 @@
 #   so a conflict is never silently skipped. Do not add continue-on-error
 #   to the issue steps.
 #
-# NOTE — fork Dom branch:
-#   A separate job (sync-dom, added Nov 16, 2026) fast-forwards the fork's
-#   Dom branch to upstream Dom — fast-forward ONLY: if fork Dom has
-#   diverged, that job fails and pushes nothing for Dom. The GV70 sync
-#   jobs do not depend on it: they merge upstream Dom directly into each
-#   target branch, exactly as before.
+# NOTE — fork testing branch:
+#   A separate job (sync-testing) fast-forwards the fork's testing
+#   branch to upstream testing — fast-forward ONLY: if fork testing has
+#   diverged, that job fails and pushes nothing for testing. The GV70
+#   sync jobs do not depend on it: they merge upstream testing directly
+#   into each target branch, exactly as before.
+#   (Switched from Dom to testing Nov 21, 2026: upstream froze Dom at
+#   2c9a556f and moved development and PRs to testing, which descends
+#   from that head. The fork's Dom branch is no longer synced by this
+#   workflow; it stays frozen at 2c9a556f for reference.)
 #
 # NOTE — Actions in this fork:
 #   Enabling Actions enables ALL workflows in the fork whose triggers
@@ -95,7 +99,7 @@
 #   disabled in the fork's Actions tab on Oct 29, 2026; keep them disabled.
 #   This file itself must be on the default branch to run on schedule.
 
-name: Sync upstream Dom
+name: Sync upstream testing
 
 on:
   schedule:
@@ -107,7 +111,7 @@ permissions:
   issues: write
 
 jobs:
-  sync-dom:
+  sync-testing:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -118,34 +122,35 @@ jobs:
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fast-forward fork Dom to upstream Dom
+      - name: Fast-forward fork testing to upstream testing
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           git remote add upstream https://github.com/StarPilotHQ/StarPilot.git || true
-          git fetch --no-tags upstream "+refs/heads/Dom:refs/remotes/upstream/Dom"
-          git fetch --no-tags origin "+refs/heads/Dom:refs/remotes/origin/Dom"
-          OLD_DOM="$(git rev-parse origin/Dom)"
-          UPSTREAM_DOM="$(git rev-parse upstream/Dom)"
-          if [ "$OLD_DOM" = "$UPSTREAM_DOM" ]; then
+          git fetch --no-tags upstream "+refs/heads/testing:refs/remotes/upstream/testing"
+          git fetch --no-tags origin "+refs/heads/testing:refs/remotes/origin/testing"
+          OLD_TESTING="$(git rev-parse origin/testing)"
+          UPSTREAM_TESTING="$(git rev-parse upstream/testing)"
+          if [ "$OLD_TESTING" = "$UPSTREAM_TESTING" ]; then
             {
-              echo "### Fork Dom already up to date"
-              echo "- Head: $OLD_DOM (unchanged)"
+              echo "### Fork testing already up to date"
+              echo "- Head: $OLD_TESTING (unchanged)"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Fast-forward ONLY: if fork Dom has diverged from upstream Dom,
-          # --ff-only fails, this job fails, and nothing is pushed for Dom.
-          git checkout -B Dom origin/Dom
-          git merge --ff-only upstream/Dom || {
-            echo "Fork Dom ($OLD_DOM) is not a fast-forward of upstream Dom ($UPSTREAM_DOM) — needs manual review, nothing pushed for Dom."
+          # Fast-forward ONLY: if fork testing has diverged from upstream
+          # testing, --ff-only fails, this job fails, and nothing is
+          # pushed for testing.
+          git checkout -B testing origin/testing
+          git merge --ff-only upstream/testing || {
+            echo "Fork testing ($OLD_TESTING) is not a fast-forward of upstream testing ($UPSTREAM_TESTING) — needs manual review, nothing pushed for testing."
             exit 1
           }
-          git push origin Dom
+          git push origin testing
           {
-            echo "### Fork Dom fast-forwarded to upstream Dom"
-            echo "- Old head: $OLD_DOM"
-            echo "- New head: $UPSTREAM_DOM"
+            echo "### Fork testing fast-forwarded to upstream testing"
+            echo "- Old head: $OLD_TESTING"
+            echo "- New head: $UPSTREAM_TESTING"
           } >> "$GITHUB_STEP_SUMMARY"
 
   sync:
@@ -164,7 +169,7 @@ jobs:
     # One run at a time per branch; a run for one branch never cancels
     # or blocks the other branch's run.
     concurrency:
-      group: sync-upstream-dom-${{ matrix.branch }}
+      group: sync-upstream-testing-${{ matrix.branch }}
       cancel-in-progress: false
     steps:
       - name: Check out default branch
@@ -195,7 +200,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
             # Targeted fetches only (see header note 8): full history is
             # needed for the merge base, but only for these two refs.
-            git fetch --no-tags upstream "+refs/heads/Dom:refs/remotes/upstream/Dom"
+            git fetch --no-tags upstream "+refs/heads/testing:refs/remotes/upstream/testing"
             git fetch --no-tags origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
           fi
 
@@ -283,7 +288,7 @@ jobs:
           echo "--- expected ---"; cat /tmp/expected_markers.tsv
           echo "--- forbidden ---"; cat /tmp/forbidden_markers.tsv
 
-      - name: Merge upstream Dom into branch
+      - name: Merge upstream testing into branch
         id: merge
         if: steps.check.outputs.skip != 'true'
         run: |
@@ -301,7 +306,7 @@ jobs:
           echo "$OUR_FILES" > /tmp/our_files.txt
           git checkout "$BRANCH"
           OLD_HEAD="$(git rev-parse HEAD)"
-          UPSTREAM_HEAD="$(git rev-parse upstream/Dom)"
+          UPSTREAM_HEAD="$(git rev-parse upstream/testing)"
           echo "old_head=$OLD_HEAD" >> "$GITHUB_OUTPUT"
           echo "upstream_head=$UPSTREAM_HEAD" >> "$GITHUB_OUTPUT"
           # Self-validate the receipt computation BEFORE trusting it:
@@ -349,7 +354,7 @@ jobs:
             fi
           done < /tmp/our_files.txt
           echo "at_risk_files=$(paste -sd ',' /tmp/our_at_risk.txt)" >> "$GITHUB_OUTPUT"
-          if git merge --no-edit upstream/Dom; then
+          if git merge --no-edit upstream/testing; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
             echo "receipt_conflict_only=false" >> "$GITHUB_OUTPUT"
           else
@@ -496,7 +501,7 @@ jobs:
               with open('prebuilt.json', 'w') as fh:
                   fh.write(json.dumps({'schema_version': 1, 'protected_inventory_sha256': digest}, sort_keys=True) + '\n')
               subprocess.check_call(['git', 'add', 'prebuilt.json'])
-              subprocess.check_call(['git', 'commit', '-m', 'prebuilt receipt for upstream Dom merge (auto-recomputed by sync workflow)'])
+              subprocess.check_call(['git', 'commit', '-m', 'prebuilt receipt for upstream testing merge (auto-recomputed by sync workflow)'])
               stored2 = json.loads(subprocess.check_output(['git', 'show', 'HEAD:prebuilt.json']))['protected_inventory_sha256']
               got2 = pbm.inventory_digest(entries('HEAD'))
               if stored2 != got2:
@@ -523,18 +528,18 @@ jobs:
           # loudly instead of silently skipping the conflict report.
           INTENDED="${{ matrix.intended }}"
           DATE="$(date -u +%F)"
-          TITLE="[sync-conflict] $BRANCH — upstream Dom merge conflict $DATE"
-          BODY="Daily upstream sync stopped: merging StarPilotHQ/StarPilot Dom into $BRANCH conflicted, so NOTHING was pushed for this branch and the comma is unchanged.
+          TITLE="[sync-conflict] $BRANCH — upstream testing merge conflict $DATE"
+          BODY="Daily upstream sync stopped: merging StarPilotHQ/StarPilot testing into $BRANCH conflicted, so NOTHING was pushed for this branch and the comma is unchanged.
 
           - Branch: $BRANCH
-          - Upstream Dom commit attempted: $UPSTREAM_HEAD
+          - Upstream testing commit attempted: $UPSTREAM_HEAD
           - Fork head before merge: $OLD_HEAD
           - Conflicted files:
           \`\`\`
           $FILES
           \`\`\`
 
-          Resolve manually: check out $BRANCH locally, merge upstream/Dom, resolve the conflicts preserving the intended branch state ($INTENDED). The prebuilt.json receipt is then recomputed by the sync workflow's method (or by hand with the same validated digest) — since Nov 3, 2026 the workflow auto-resolves prebuilt.json-only conflicts and recomputes receipts itself, so a conflict issue means a real file conflicted."
+          Resolve manually: check out $BRANCH locally, merge upstream/testing, resolve the conflicts preserving the intended branch state ($INTENDED). The prebuilt.json receipt is then recomputed by the sync workflow's method (or by hand with the same validated digest) — since Nov 3, 2026 the workflow auto-resolves prebuilt.json-only conflicts and recomputes receipts itself, so a conflict issue means a real file conflicted."
           # Do not open a duplicate if an open issue for this branch already exists; comment on it instead.
           EXISTING="$(gh issue list --repo itsgreat2misha/StarPilot --state open --limit 100 --json number,title | python3 -c "import json, os, sys; data = json.load(sys.stdin); print(next((str(i['number']) for i in data if i['title'].startswith('[sync-conflict] ' + os.environ['BRANCH'])), ''))")"
           if [ -n "$EXISTING" ]; then
@@ -563,7 +568,7 @@ jobs:
           BODY="Daily upstream sync merged cleanly into $BRANCH, but our changes were LOST in the merge: the files below were changed on this branch relative to the merge base, and the merged result no longer contains the branch's changes, so NOTHING was pushed for this branch and the comma is unchanged.
 
           - Branch: $BRANCH
-          - Upstream Dom commit attempted: $UPSTREAM_HEAD
+          - Upstream testing commit attempted: $UPSTREAM_HEAD
           - Fork head before merge: $OLD_HEAD
           - Files whose branch changes were lost:
           \`\`\`
@@ -586,7 +591,7 @@ jobs:
             {
               echo "### Already up to date: $BRANCH"
               echo "- Head: ${{ steps.merge.outputs.old_head }} (unchanged)"
-              echo "- Upstream Dom head: ${{ steps.merge.outputs.upstream_head }}"
+              echo "- Upstream testing head: ${{ steps.merge.outputs.upstream_head }}"
               echo "Nothing to merge, nothing pushed. Receipt at head verified by the workflow's self-validated digest."
             } >> "$GITHUB_STEP_SUMMARY"
           else
@@ -595,7 +600,7 @@ jobs:
               echo "### Upstream sync pushed: $BRANCH"
               echo "- Old head: ${{ steps.merge.outputs.old_head }}"
               echo "- New head: ${{ steps.receipt.outputs.new_head }}"
-              echo "- Upstream Dom head: ${{ steps.merge.outputs.upstream_head }}"
+              echo "- Upstream testing head: ${{ steps.merge.outputs.upstream_head }}"
               echo "- Files changed by merge: ${{ steps.merge.outputs.merged_files }}"
               echo "- Receipt-only conflict auto-resolved: ${{ steps.merge.outputs.receipt_conflict_only }}"
               echo "- prebuilt.json receipt recomputed by workflow: ${{ steps.receipt.outputs.receipt_changed }} (digest self-validated against the previous head before the merge, and verified against the new tree after writing — the new head is Galaxy-safe as-is)"
